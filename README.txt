@@ -18,7 +18,7 @@ chmod +x test_backend.sh
 
 
 
-- Instructions to Update the Bakend jor on the cloud (Render or other VPS)
+- Instructions to Update the Backend on the cloud (Render or other VPS)
 
 Commit the updated backend to your existing GitHub repo
 git add .
