@@ -92,5 +92,11 @@ app.get("/analytics", (req, res) => {
     res.json(logs);
 });
 
+// Healthcheck route
+app.get("/", (req, res) => {
+  res.json({ status: "ok", message: "Chatbot backend running 🚀" });
+});
+
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Chatbot backend running on port ${PORT}`));
