@@ -1,4 +1,4 @@
-// backend/server.js
+// server.js
 import express from "express";
 import cors from "cors";
 import bodyParser from "body-parser";
@@ -9,127 +9,122 @@ const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
-// In-memory storage for demonstration
-// Replace with DB later for persistence
-const userMemory = {}; // { userId: [ {message, reply, timestamp} ] }
-const logs = []; // global log for analytics
+// In-memory storage
+const userMemory = {}; // { userId: [ {role, text, timestamp} ] }
+const logs = [];       // global log for analytics
 
 const GPT_API_URL = "https://api.openai.com/v1/responses";
 const GPT_API_KEY = process.env.OPENAI_API_KEY;
 
-// Warn if key missing
-if (!GPT_API_KEY) {
-  console.error("❌ Missing OPENAI_API_KEY. Please set it in Render Environment Variables.");
-}
-
-// Helper to call GPT-4o-mini
+// ✅ Helper to call GPT-4o-mini correctly
 async function callGPT(userId, message) {
-  const conversation = userMemory[userId] || [];
-  const contextMessages = conversation.map(m => ({
-    role: m.role,
-    content: m.text
-  }));
+    const conversation = userMemory[userId] || [];
+    const contextMessages = conversation.map(m => ({
+        role: m.role,
+        content: m.text
+    }));
 
-  const payload = {
-    model: "gpt-4o-mini",
-    input: [
-      ...contextMessages,
-      { role: "user", content: message }
-    ]
-  };
+    const payload = {
+        model: "gpt-4o-mini",
+        input: [
+            ...contextMessages,
+            { role: "user", content: message }
+        ],
+    };
 
-  try {
     const res = await fetch(GPT_API_URL, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${GPT_API_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(payload)
+        method: "POST",
+        headers: {
+            "Authorization": `Bearer ${GPT_API_KEY}`,
+            "Content-Type": "application/json"
+        },
+        body: JSON.stringify(payload)
     });
 
-    if (!res.ok) {
-      const errText = await res.text();
-      throw new Error(`OpenAI API error (${res.status}): ${errText}`);
-    }
-
     const data = await res.json();
-    return data.output_text || "⚠️ Sorry, I could not generate a response.";
-  } catch (err) {
-    console.error("❌ OpenAI request failed:", err.message);
-    throw err;
-  }
+
+    // ✅ Extract text properly
+    const reply = data?.output?.[0]?.content?.[0]?.text || null;
+
+    return reply;
 }
 
 // POST /chat
 app.post("/chat", async (req, res) => {
-  const userId = req.headers["x-user-id"] || uuidv4();
-  const message = req.body.message || "";
+    const userId = req.headers["x-user-id"] || uuidv4();
+    const message = req.body.message || "";
 
-  if (!userMemory[userId]) userMemory[userId] = [];
+    if (!userMemory[userId]) userMemory[userId] = [];
 
-  const FAQs = [
-    { trigger: /shipping/i, reply: "We offer standard, express, and overnight shipping." },
-    { trigger: /return/i, reply: "You can return most items within 30 days of purchase." },
-    { trigger: /payment/i, reply: "We accept Visa, MasterCard, PayPal, and Apple Pay." },
-    { trigger: /contact/i, reply: "You can reach us via our Contact page or email support@example.com." }
-  ];
+    // Fallback FAQs
+    const FAQs = [
+        { trigger: /shipping/i, reply: "We offer standard, express, and overnight shipping." },
+        { trigger: /return/i, reply: "You can return most items within 30 days of purchase." },
+        { trigger: /payment/i, reply: "We accept Visa, MasterCard, PayPal, and Apple Pay." },
+        { trigger: /contact/i, reply: "You can reach us via our Contact page or email support@example.com." }
+    ];
 
-  let reply = "";
-  try {
-    reply = await callGPT(userId, message);
-    if (!reply) throw new Error("Empty GPT reply");
-  } catch (e) {
-    const faqMatch = FAQs.find(f => f.trigger.test(message));
-    reply = faqMatch ? faqMatch.reply : "⚠️ Sorry, I could not generate a response.";
-  }
+    let reply = "";
+    try {
+        reply = await callGPT(userId, message);
+        if (!reply) throw new Error("Empty GPT reply");
+    } catch (e) {
+        console.error("❌ GPT call failed:", e.message);
+        const faqMatch = FAQs.find(f => f.trigger.test(message));
+        reply = faqMatch ? faqMatch.reply : "⚠️ Sorry, I could not generate a response.";
+    }
 
-  userMemory[userId].push({ role: "user", text: message, timestamp: new Date().toISOString() });
-  userMemory[userId].push({ role: "assistant", text: reply, timestamp: new Date().toISOString() });
+    // Save memory
+    userMemory[userId].push({ role: "user", text: message, timestamp: new Date().toISOString() });
+    userMemory[userId].push({ role: "assistant", text: reply, timestamp: new Date().toISOString() });
 
-  logs.push({ timestamp: new Date().toISOString(), userId, message, response: reply });
+    // Log analytics
+    logs.push({ timestamp: new Date().toISOString(), userId, message, response: reply });
 
-  res.json({ reply });
+    res.json({ reply });
 });
 
 // POST /chat/clear
 app.post("/chat/clear", (req, res) => {
-  const userId = req.headers["x-user-id"];
-  if (userId) delete userMemory[userId];
-  res.json({ status: "ok" });
+    const userId = req.headers["x-user-id"];
+    if (userId) delete userMemory[userId];
+    res.json({ status: "ok" });
 });
 
 // GET /analytics
 app.get("/analytics", (req, res) => {
-  res.json(logs);
+    res.json(logs);
 });
 
-// Healthcheck
+// GET / (healthcheck)
 app.get("/", (req, res) => {
-  res.json({ status: "ok", message: "Chatbot backend running 🚀" });
+    res.json({ status: "ok", message: "Chatbot backend running 🚀" });
 });
 
-// Test OpenAI key
+// GET /test-openai (check key works)
 app.get("/test-openai", async (req, res) => {
-  try {
-    const testRes = await fetch(GPT_API_URL, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${GPT_API_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        input: [{ role: "user", content: "Say hello in one sentence" }]
-      })
-    });
+    try {
+        const payload = {
+            model: "gpt-4o-mini",
+            input: [{ role: "user", content: "Say hello in one short sentence." }],
+        };
 
-    const data = await testRes.json();
-    res.json(data);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+        const response = await fetch(GPT_API_URL, {
+            method: "POST",
+            headers: {
+                "Authorization": `Bearer ${GPT_API_KEY}`,
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify(payload)
+        });
+
+        const data = await response.json();
+        res.json(data);
+    } catch (e) {
+        res.status(500).json({ error: "OpenAI test failed", details: e.message });
+    }
 });
 
+// Start server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 Chatbot backend running on port ${PORT}`));
