@@ -4,10 +4,6 @@ import cors from "cors";
 import bodyParser from "body-parser";
 import { v4 as uuidv4 } from "uuid";
 import fetch from "node-fetch";
-import dotenv from "dotenv";
-
-// Load env vars locally (Render sets them automatically in prod)
-dotenv.config();
 
 const app = express();
 app.use(cors());
