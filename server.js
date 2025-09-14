@@ -1,5 +1,5 @@
 // server.js
-// v2.6.1
+// v2.7.0
 // Author: YAA
 
 import express from "express";
@@ -271,6 +271,104 @@ function cosineSim(a, b) {
   return dot / (Math.sqrt(na) * Math.sqrt(nb) + 1e-12);
 }
 
+// ==========================
+// 🔥 CACHING (tenants + query embeddings)
+// ==========================
+const CACHE_MAX_TENANTS   = Number(process.env.CACHE_MAX_TENANTS   ?? 20);
+const CACHE_MAX_QUERY_EMB = Number(process.env.CACHE_MAX_QUERY_EMB ?? 1000);
+const CACHE_QUERY_TTL_MS  = Number(process.env.CACHE_QUERY_TTL_MS  ?? 5 * 60 * 1000);
+
+const TENANT_EMB_CACHE  = new Map(); // tenantId -> {mtime, last, chunks:[{url,text,vec:Float32Array}], dim}
+const TENANT_PROD_CACHE = new Map(); // tenantId -> {mtime, last, products, emb:[Float32Array], dim}
+const QUERY_EMB_CACHE   = new Map(); // key -> {vec:Float32Array, t, last}
+
+function toF32Normalized(vec) {
+  if (!Array.isArray(vec)) return new Float32Array(0);
+  let sum = 0;
+  for (let i = 0; i < vec.length; i++) sum += vec[i] * vec[i];
+  const norm = Math.sqrt(sum) || 1;
+  const out = new Float32Array(vec.length);
+  for (let i = 0; i < vec.length; i++) out[i] = vec[i] / norm;
+  return out;
+}
+
+function dot(a, b) {
+  const len = Math.min(a.length, b.length);
+  let d = 0;
+  for (let i = 0; i < len; i++) d += a[i] * b[i];
+  return d; // cosine if inputs are unit-normalized
+}
+
+function lruTouch(map, key, payload) {
+  const now = Date.now();
+  const val = payload ? { ...payload, last: now } : { ...map.get(key), last: now };
+  map.set(key, val);
+  if (CACHE_MAX_TENANTS > 0 && map.size > CACHE_MAX_TENANTS) {
+    let oldestKey, oldest = Infinity;
+    for (const [k, v] of map) if (v.last < oldest) { oldest = v.last; oldestKey = k; }
+    if (oldestKey) map.delete(oldestKey);
+  }
+}
+
+function lruTouchQuery(key, vec) {
+  const now = Date.now();
+  const entry = { vec, t: now, last: now };
+  QUERY_EMB_CACHE.set(key, entry);
+  if (CACHE_MAX_QUERY_EMB > 0 && QUERY_EMB_CACHE.size > CACHE_MAX_QUERY_EMB) {
+    let oldestKey, oldest = Infinity;
+    for (const [k, v] of QUERY_EMB_CACHE) if (v.last < oldest) { oldest = v.last; oldestKey = k; }
+    if (oldestKey) QUERY_EMB_CACHE.delete(oldestKey);
+  }
+}
+
+function getTenantEmbeddingsCached(tenantId) {
+  const dir = tenantDir(tenantId);
+  const EMB_FILE = path.join(dir, "embeddings.json");
+  let st; try { st = fs.statSync(EMB_FILE); } catch { return { chunks: [], dim: 0 }; }
+  const mtime = st.mtimeMs;
+
+  const cached = TENANT_EMB_CACHE.get(tenantId);
+  if (cached && cached.mtime === mtime) { lruTouch(TENANT_EMB_CACHE, tenantId); return cached; }
+
+  const raw = readJSON(EMB_FILE, { chunks: [] });
+  const dim = raw.chunks?.[0]?.vec?.length || 0;
+  for (const c of raw.chunks) c.vec = toF32Normalized(c.vec || []);
+  const payload = { mtime, chunks: raw.chunks, dim, last: Date.now() };
+  lruTouch(TENANT_EMB_CACHE, tenantId, payload);
+  return payload;
+}
+
+function getTenantProductsCached(tenantId) {
+  const dir = tenantDir(tenantId);
+  const PROD_FILE = path.join(dir, "products.json");
+  let st; try { st = fs.statSync(PROD_FILE); } catch { return { products: [], emb: [], dim: 0 }; }
+  const mtime = st.mtimeMs;
+
+  const cached = TENANT_PROD_CACHE.get(tenantId);
+  if (cached && cached.mtime === mtime) { lruTouch(TENANT_PROD_CACHE, tenantId); return cached; }
+
+  const raw = readJSON(PROD_FILE, { products: [], emb: [] });
+  const dim = raw.emb?.[0]?.length || 0;
+  const emb = raw.emb.map(v => toF32Normalized(v || []));
+  const payload = { mtime, products: raw.products, emb, dim, last: Date.now() };
+  lruTouch(TENANT_PROD_CACHE, tenantId, payload);
+  return payload;
+}
+
+async function embedQueryCached(text) {
+  const key = text.slice(0, 1000).toLowerCase();
+  const now = Date.now();
+  const entry = QUERY_EMB_CACHE.get(key);
+  if (entry && (now - entry.t) < CACHE_QUERY_TTL_MS) {
+    entry.last = now; // touch
+    return entry.vec;
+  }
+  const [vec] = await embedBatch([text]);
+  const f32 = toF32Normalized(vec);
+  if (CACHE_MAX_QUERY_EMB > 0 && CACHE_QUERY_TTL_MS > 0) lruTouchQuery(key, f32);
+  return f32;
+}
+
 // Build or update a tenant index
 async function buildTenantIndex(tenantId, baseUrl, maxPages = 80) {
   const dir = tenantDir(tenantId);
@@ -315,6 +413,10 @@ async function buildTenantIndex(tenantId, baseUrl, maxPages = 80) {
     writeJSON(PROD_FILE, { products: [], emb: [] });
   }
 
+  // Invalidate caches for this tenant (next read will reload)
+  TENANT_EMB_CACHE.delete(tenantId);
+  TENANT_PROD_CACHE.delete(tenantId);
+
   return { pages: pages.length, chunks: chunkIndex.length, products: products.length };
 }
 
@@ -329,23 +431,21 @@ function loadTenantProducts(tenantId) {
   return readJSON(PROD_FILE, { products: [], emb: [] });
 }
 
-// Simple top-K retrieval
+// Simple top-K retrieval (cached + typed arrays)
 async function retrieveContext(tenantId, query, k = 8) {
-  const emb = await embedBatch([query]);
-  const qvec = emb[0];
-  const { chunks } = loadTenantEmbeddings(tenantId);
+  const q = await embedQueryCached(query);
+  const { chunks } = getTenantEmbeddingsCached(tenantId);
   if (!chunks.length) return [];
-  const scored = chunks.map((c) => ({ ...c, score: cosineSim(qvec, c.vec || []) }));
+  const scored = chunks.map(c => ({ ...c, score: dot(q, c.vec) })); // cosine because normalized
   scored.sort((a, b) => b.score - a.score);
   return scored.slice(0, k);
 }
 
 async function retrieveProducts(tenantId, query, k = 5) {
-  const emb = await embedBatch([query]);
-  const qvec = emb[0];
-  const { products, emb: prodVecs } = loadTenantProducts(tenantId);
+  const q = await embedQueryCached(query);
+  const { products, emb } = getTenantProductsCached(tenantId);
   if (!products.length) return [];
-  const scored = products.map((p, i) => ({ ...p, score: cosineSim(qvec, prodVecs[i] || []) }));
+  const scored = products.map((p, i) => ({ ...p, score: dot(q, emb[i] || new Float32Array(0)) }));
   scored.sort((a, b) => b.score - a.score);
   return scored.slice(0, k);
 }
@@ -471,6 +571,9 @@ app.post("/products/upload", async (req, res) => {
     const vecs = texts.length ? await embedBatch(texts) : [];
     writeJSON(PROD_FILE, { products: items, emb: vecs });
 
+    // Invalidate product cache for this tenant
+    TENANT_PROD_CACHE.delete(tenantId);
+
     res.json({ ok: true, products: items.length });
   } catch (e) {
     console.error(e);
@@ -489,7 +592,7 @@ app.get("/products", (req, res) => {
 // POST /chat
 app.post("/chat", async (req, res) => {
   const userId = (req.headers["x-user-id"] || "").toString() || uuidv4();
-  const tenantId = (req.headers["x-tenant-id"] || "").toString().trim(); // NEW: which site to ground on
+  const tenantId = (req.headers["x-tenant-id"] || "").toString().trim(); // which site to ground on
   const message = (req.body?.message || "").toString();
   let userPlan = (req.headers["x-plan"] || "rule").toString();
   const customApiKey = (req.headers["x-api-key"] || "").toString().trim(); // enterprise BYOK
