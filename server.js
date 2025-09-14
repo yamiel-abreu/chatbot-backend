@@ -1,5 +1,5 @@
 // server.js
-// v2.6
+// v2.6.1
 // Author: YAA
 
 import express from "express";
@@ -81,22 +81,48 @@ const PLANS = {
   enterprise: { mode: "ai", AI_MONTHLY_LIMIT: 10000, strict: true },   // Enterprise
 };
 
-// ---- FAQs (hot-reload + regex compilation) ----
+// ---- FAQs (hot-reload + SAFE regex compilation) ----
 let FAQs = [];
 let _faqsMTimeMs = 0;
 
-function compileFAQs(raw) {
-  return raw.map((f) => {
-    if (f.trigger instanceof RegExp) return f;
-    if (typeof f.trigger === "string") {
-      return { trigger: new RegExp(f.trigger, "i"), reply: f.reply };
+// SAFE: convert trigger → RegExp, supporting string, "/pattern/flags", and {pattern, flags}
+function safeToRegExp(trigger) {
+  if (trigger instanceof RegExp) return trigger;
+
+  // Object form: { pattern, flags }
+  if (trigger && typeof trigger === "object" && trigger.pattern) {
+    try {
+      return new RegExp(trigger.pattern, trigger.flags || "i");
+    } catch (e) {
+      console.warn("Bad FAQ regex object:", trigger, e.message);
+      return /$a^/; // never matches
     }
-    if (typeof f.trigger === "object" && f.trigger?.pattern) {
-      return { trigger: new RegExp(f.trigger.pattern, f.trigger.flags || "i"), reply: f.reply };
+  }
+
+  // String form: allow "/.../flags" or plain "..." and strip inline (?i)
+  if (typeof trigger === "string") {
+    const s = trigger.trim();
+    const match = s.match(/^\/(.+)\/([a-z]*)$/i); // "/pattern/flags"
+    let pattern = match ? match[1] : s;
+    let flags = (match ? match[2] : "i") || "i";
+    // Remove inline PCRE flag (?i) which JS RegExp doesn't support
+    pattern = pattern.replace(/\(\?i\)/gi, "");
+    try {
+      if (!/i/.test(flags)) flags += "i";
+      return new RegExp(pattern, flags);
+    } catch (e) {
+      console.warn("Bad FAQ regex string:", s, e.message);
+      return /$a^/; // never matches
     }
-    return { trigger: /$a^/i, reply: f.reply };
-  });
+  }
+
+  return /$a^/; // never matches
 }
+
+function compileFAQs(raw) {
+  return (raw || []).map(f => ({ trigger: safeToRegExp(f.trigger), reply: f.reply }));
+}
+
 function loadFAQsIfChanged() {
   try {
     const stat = fs.statSync(FAQS_FILE);
@@ -110,8 +136,11 @@ function loadFAQsIfChanged() {
     console.warn("⚠️ Failed to read faqs.json; keeping previous FAQs.", e.message);
   }
 }
+
+// initial load + watch
 loadFAQsIfChanged();
-fs.watchFile(FAQS_FILE, { interval: 1000 }, loadFAQsIfChanged());
+// FIXED: pass a function, not the result
+fs.watchFile(FAQS_FILE, { interval: 1000 }, () => loadFAQsIfChanged());
 
 // ---- Memory + logs (in-memory) ----
 const userMemory = {};
@@ -136,10 +165,10 @@ function writeJSON(file, obj) {
 }
 
 function normalizeUrl(u) {
-  try { 
+  try {
     const url = new URL(u);
     url.hash = "";
-    return url.toString().replace(/\/+$/, ""); 
+    return url.toString().replace(/\/+$/, "");
   } catch { return null; }
 }
 
@@ -502,7 +531,7 @@ app.post("/chat", async (req, res) => {
           let productBlocks = [];
           if (tenantId) {
             contextBlocks = await retrieveContext(tenantId, message, 8);
-            // If user asks about products or intent looks producty, fetch product candidates
+            // product intent detection
             const producty = /\b(product|buy|price|sizes?|colors?|catalog|shop|add to cart|order|stock|available|recommend)\b/i.test(message);
             if (producty) {
               productBlocks = await retrieveProducts(tenantId, message, 6);
@@ -527,7 +556,7 @@ Never invent facts. Prefer short, direct answers. Include links only if they are
           reply = await callGPT(messages, apiKeyToUse);
           usedAI = true;
 
-          // If still nothing helpful and we had no context, fall back softly to FAQs (optional)
+          // Soft fallback to FAQs if no context and strict reply
           if ((!reply || /I’m not sure based on the site content/i.test(reply)) && !contextBlocks.length) {
             const faq = findFAQReply(message);
             if (faq) reply = faq;
