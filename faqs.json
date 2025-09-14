@@ -1,26 +1,27 @@
 [
   {
-    "trigger": "(?i)shipping|delivery|ship",
+    "trigger": "shipping|delivery|ship",
     "reply": "📦 We offer standard (3–5 business days), express (1–2 business days), and overnight shipping options."
   },
   {
-    "trigger": "(?i)return|refund|exchange",
+    "trigger": "return|refund|exchange",
     "reply": "🔄 You can return or exchange items within 30 days of purchase. Refunds are issued to the original payment method."
   },
   {
-    "trigger": "(?i)payment|pay|checkout",
+    "trigger": "payment|pay|checkout",
     "reply": "💳 We accept Visa, MasterCard, PayPal, and Apple Pay at checkout."
   },
   {
-    "trigger": "(?i)contact|support|help",
+    "trigger": "contact|support|help",
     "reply": "☎️ You can reach our support team by email at support@example.com or via the Contact Us page."
   },
   {
-    "trigger": "(?i)hours|opening|open|close",
+    "trigger": "hours|opening|open|close",
     "reply": "🕑 Our customer service is available Monday–Friday, 9am–6pm CET."
   },
   {
-    "trigger": "(?i)order status|track|tracking",
+    "trigger": "order status|track|tracking",
     "reply": "📍 You can track your order by visiting the 'My Orders' section of your account."
   }
 ]
+
