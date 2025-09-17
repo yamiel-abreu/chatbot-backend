@@ -1,5 +1,5 @@
 // server.js
-// v2.7.0
+// v2.8.0
 // Author: YAA
 
 import express from "express";
@@ -25,7 +25,14 @@ const DEFAULT_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 const EMBEDDING_MODEL = process.env.OPENAI_EMBED_MODEL || "text-embedding-3-small";
 const DEFAULT_API_KEY = process.env.OPENAI_API_KEY;
 
-// DATA DIR so Render can mount a disk; fallback to CWD
+// ---- RAG limits (env-tunable, keep memory low) ----
+const CHUNK_SIZE = Number(process.env.CHUNK_SIZE || 1000);           // chars per chunk
+const CHUNK_OVERLAP = Number(process.env.CHUNK_OVERLAP || 150);      // overlap chars
+const MAX_TEXT_PER_PAGE = Number(process.env.MAX_TEXT_PER_PAGE || 100_000);
+const MAX_CHUNKS_PER_TENANT = Number(process.env.MAX_CHUNKS_PER_TENANT || 3000);
+const EMB_BATCH = Number(process.env.EMB_BATCH || 50);               // embeddings per HTTP call
+
+// DATA DIR so Render/Host VPS can mount a disk; fallback to CWD
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, ".");
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
@@ -139,7 +146,7 @@ function loadFAQsIfChanged() {
 
 // initial load + watch
 loadFAQsIfChanged();
-// FIXED: pass a function, not the result
+// pass a function, not the result
 fs.watchFile(FAQS_FILE, { interval: 1000 }, () => loadFAQsIfChanged());
 
 // ---- Memory + logs (in-memory) ----
@@ -236,29 +243,54 @@ function extractProductsFromHtml(html, pageUrl) {
   return products;
 }
 
-// Chunk a large text
-function chunkText(text, chunkSize = 1200, overlap = 200) {
+// Chunk a large text (basic)
+function chunkText(text, chunkSize = CHUNK_SIZE, overlap = CHUNK_OVERLAP) {
   const chunks = [];
   let i = 0;
   while (i < text.length) {
     const end = Math.min(text.length, i + chunkSize);
     const slice = text.slice(i, end);
-    chunks.push(slice);
+    chunks.push(slice.trim());
     i = end - overlap;
     if (i < 0) i = end;
   }
-  return chunks.map((c) => c.trim()).filter(Boolean);
+  return chunks.filter(Boolean);
 }
 
-async function embedBatch(texts) {
-  const res = await fetch("https://api.openai.com/v1/embeddings", {
-    method: "POST",
-    headers: { "Authorization": `Bearer ${DEFAULT_API_KEY}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ model: EMBEDDING_MODEL, input: texts }),
-  });
-  if (!res.ok) throw new Error(`Embeddings HTTP ${res.status}`);
-  const data = await res.json();
-  return data.data.map((d) => d.embedding);
+// helper to honor global cap when chunking
+function chunkTextWithCaps(text, size, overlap, remaining) {
+  if (remaining <= 0) return [];
+  const out = [];
+  let i = 0;
+  while (i < text.length && out.length < remaining) {
+    const end = Math.min(text.length, i + size);
+    out.push(text.slice(i, end).trim());
+    i = end - overlap;
+    if (i < 0) i = end;
+  }
+  return out.filter(Boolean);
+}
+
+// ---- Embeddings (batched to avoid huge payloads) ----
+async function embedBatch(texts, batchSize = EMB_BATCH) {
+  const out = [];
+  for (let i = 0; i < texts.length; i += batchSize) {
+    const slice = texts.slice(i, i + batchSize);
+    const res = await fetch("https://api.openai.com/v1/embeddings", {
+      method: "POST",
+      headers: { "Authorization": `Bearer ${DEFAULT_API_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ model: EMBEDDING_MODEL, input: slice }),
+    });
+    if (!res.ok) {
+      const msg = await res.text().catch(() => "");
+      throw new Error(`Embeddings HTTP ${res.status}: ${msg}`);
+    }
+    const data = await res.json();
+    out.push(...data.data.map(d => d.embedding));
+    // tiny delay to smooth bursts
+    await new Promise(r => setTimeout(r, 100));
+  }
+  return out;
 }
 
 function cosineSim(a, b) {
@@ -369,55 +401,82 @@ async function embedQueryCached(text) {
   return f32;
 }
 
-// Build or update a tenant index
+// Build or update a tenant index (streamed + capped to avoid OOM)
 async function buildTenantIndex(tenantId, baseUrl, maxPages = 80) {
   const dir = tenantDir(tenantId);
-  const SITE_FILE = path.join(dir, "site.json");            // { baseUrl, pages:[{url,text}] }
-  const EMB_FILE = path.join(dir, "embeddings.json");       // { chunks:[{url, text, vec}] }
-  const PROD_FILE = path.join(dir, "products.json");        // { products:[...], emb:[...] }
+  const STATUS_FILE = path.join(dir, "status.json");
+  const EMB_FILE = path.join(dir, "embeddings.json");  // {"chunks":[ ... ]}
+  const PROD_FILE = path.join(dir, "products.json");   // { products:[], emb:[] }
 
   const urls = await fetchSitemapUrls(baseUrl, maxPages);
-  const pages = [];
 
+  // prepare embeddings writer (stream JSON array incrementally)
+  const embStream = fs.createWriteStream(EMB_FILE, { flags: "w" });
+  embStream.write('{"chunks":[');
+  let firstChunkWritten = false;
+  function writeChunkEntry(entry) {
+    if (!firstChunkWritten) { firstChunkWritten = true; }
+    else { embStream.write(","); }
+    embStream.write(JSON.stringify(entry));
+  }
+
+  let totalPages = 0;
+  let totalChunks = 0;
   const products = [];
+
+  // crawl sequentially to keep memory flat
   for (const u of urls) {
+    if (totalPages >= maxPages || totalChunks >= MAX_CHUNKS_PER_TENANT) break;
     try {
       const html = await fetchText(u);
-      const text = htmlToText(html);
-      pages.push({ url: u, text });
       const prod = extractProductsFromHtml(html, u);
       if (prod.length) products.push(...prod);
+
+      let text = htmlToText(html);
+      if (text.length > MAX_TEXT_PER_PAGE) text = text.slice(0, MAX_TEXT_PER_PAGE);
+
+      const remaining = Math.max(0, MAX_CHUNKS_PER_TENANT - totalChunks);
+      const cs = chunkTextWithCaps(text, CHUNK_SIZE, CHUNK_OVERLAP, remaining);
+      totalPages++;
+
+      // embed this page's chunks in small batches and write as we go
+      for (let i = 0; i < cs.length; i += EMB_BATCH) {
+        const sliceTexts = cs.slice(i, i + EMB_BATCH);
+        const vecs = await embedBatch(sliceTexts, EMB_BATCH);
+        for (let j = 0; j < sliceTexts.length; j++) {
+          writeChunkEntry({ url: u, text: sliceTexts[j], vec: vecs[j] });
+        }
+        totalChunks += sliceTexts.length;
+        if (totalChunks >= MAX_CHUNKS_PER_TENANT) break;
+      }
     } catch (e) {
-      console.warn("Crawl failed for", u, e.message);
+      console.warn("Crawl/index error for", u, e.message);
     }
   }
-  writeJSON(SITE_FILE, { baseUrl, pages });
 
-  // Chunk & embed site pages
-  const chunks = [];
-  for (const p of pages) {
-    const cs = chunkText(p.text);
-    cs.forEach((c) => chunks.push({ url: p.url, text: c }));
-  }
-  const chunkTexts = chunks.map((c) => c.text);
-  const vecs = chunkTexts.length ? await embedBatch(chunkTexts) : [];
-  const chunkIndex = chunks.map((c, i) => ({ ...c, vec: vecs[i] || [] }));
-  writeJSON(EMB_FILE, { chunks: chunkIndex });
+  // close embeddings stream
+  embStream.write("]}");
+  await new Promise((resolve, reject) => {
+    embStream.end(resolve);
+    embStream.on("error", reject);
+  });
 
-  // Product embeddings
+  // product embeddings (usually small; fine to do in one go)
   if (products.length) {
-    const prodTexts = products.map(p => `${p.name}\n${p.description}\n${p.brand}\n${p.price} ${p.currency}`.trim());
-    const pvecs = await embedBatch(prodTexts);
+    const texts = products.map(p => `${p.name}\n${p.description}\n${p.brand}\n${p.price} ${p.currency}`.trim());
+    const pvecs = await embedBatch(texts);
     writeJSON(PROD_FILE, { products, emb: pvecs });
   } else {
     writeJSON(PROD_FILE, { products: [], emb: [] });
   }
 
-  // Invalidate caches for this tenant (next read will reload)
+  // Invalidate caches for this tenant
   TENANT_EMB_CACHE.delete(tenantId);
   TENANT_PROD_CACHE.delete(tenantId);
 
-  return { pages: pages.length, chunks: chunkIndex.length, products: products.length };
+  const stats = { pages: totalPages, chunks: totalChunks, products: products.length };
+  writeJSON(STATUS_FILE, { ...stats, baseUrl, indexedAt: new Date().toISOString() });
+  return stats;
 }
 
 function loadTenantEmbeddings(tenantId) {
