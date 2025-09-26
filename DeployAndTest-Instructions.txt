@@ -1,0 +1,27 @@
+Instructions to deploy of a custumer site
+
+Index web content, or reindex when needed. 
+
+# server (local, fastest)
+curl -sS -X POST http://127.0.0.1:3000/site/index \
+  -H "Content-Type: application/json" \
+  -d '{"tenantId":"<client-id>","baseUrl":"https://<client-web.com>/","maxPages":120}'
+
+curl -sS "http://127.0.0.1:3000/site/status?tenantId=watekeshop"
+
+
+WordPress plugin → Backend URL: https://chatbot.nubedy.com • Tenant ID: client-id.
+
+Backups → zip /home/<site-user>/data periodically (contains usage, FAQs, indices).
+
+Tuning (only if needed): adjust EMB_BATCH, MAX_CHUNKS_PER_TENANT, CHUNK_SIZE in your PM2 env, then:
+
+pm2 restart nubedy-chatbot --update-env
+
+
+Logs/health
+
+pm2 logs --lines 200
+curl -fsS https://chatbot.nubedy.com/ && echo
+
+
