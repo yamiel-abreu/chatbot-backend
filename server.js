@@ -1,5 +1,5 @@
 // server.js
-// v2.8.0
+// v2.9.0
 // Author: YAA
 
 import express from "express";
@@ -16,7 +16,11 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+
+// CORS + preflight
 app.use(cors());
+app.options("*", cors());
+
 app.use(bodyParser.json({ limit: "2mb" }));
 
 // ---- Config (env-driven) ----
@@ -146,7 +150,6 @@ function loadFAQsIfChanged() {
 
 // initial load + watch
 loadFAQsIfChanged();
-// pass a function, not the result
 fs.watchFile(FAQS_FILE, { interval: 1000 }, () => loadFAQsIfChanged());
 
 // ---- Memory + logs (in-memory) ----
@@ -599,8 +602,7 @@ app.get("/site/status", (req, res) => {
   return res.json({ ok: true, indexed: true, ...readJSON(file, {}) });
 });
 
-// POST /products/upload  (optional) — JSON or CSV feed
-// Body: { tenantId, items:[{name,description,url,price,currency,image,sku,brand}] }  OR  { csv:string }
+// POST /products/upload
 app.post("/products/upload", async (req, res) => {
   try {
     const tenantId = (req.body?.tenantId || "").toString().trim();
@@ -792,8 +794,8 @@ app.get("/faqs", (_req, res) => {
 });
 
 // Healthcheck
-app.get("/", (_req, res) => res.json({ status: "ok" }));
+app.get("/", (_req, res) => res.json({ status: "ok", version: "2.9.0" }));
 
 // Start server
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Chatbot backend running on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Chatbot backend v2.9.0 running on port ${PORT}`));

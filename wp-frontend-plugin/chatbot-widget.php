@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Chatbot Widget + Analytics + Site Indexing
  * Description: Floating chatbot widget grounded on your website via RAG, with admin analytics, settings, site indexing, and product feed upload.
- * Version: 2.8.0
+ * Version: 2.9.0
  * Author: YAA
  */
 
@@ -21,6 +21,9 @@ register_activation_hook(__FILE__, function () {
   add_option('chatbot_base_url', get_site_url());
   add_option('chatbot_max_pages', '120');
   add_option('chatbot_plan', 'ai'); // rule | ai | enterprise
+  // NEW: theming defaults
+  add_option('chatbot_bot_name', 'Chatbot');
+  add_option('chatbot_color', '#0073aa');
 });
 
 // -----------------------
@@ -30,31 +33,47 @@ function chatbot_widget_inject() {
   $backend = nubedy_chatbot_get_option('chatbot_backend_url', 'https://chatbot-backend-9lxr.onrender.com');
   $tenant  = nubedy_chatbot_get_option('chatbot_tenant_id', 'client-123');
   $plan    = nubedy_chatbot_get_option('chatbot_plan', 'ai');
+  $botname = nubedy_chatbot_get_option('chatbot_bot_name', 'Chatbot');
+  $color   = nubedy_chatbot_get_option('chatbot_color', '#0073aa');
 
   // Escape for inline JS/HTML
   $backend_js = esc_js($backend);
   $tenant_js  = esc_js($tenant);
   $plan_js    = esc_js($plan);
+  $botname_html = esc_html($botname);
+  $color_css = esc_attr($color);
   ?>
     <style>
-      /* Simple base styles for launcher + container */
+      :root { --chat-accent: <?php echo $color_css; ?>; }
+      /* Base styles for launcher + container */
       #chatbot-launcher {
         position: fixed; bottom: 20px; right: 20px; width: 56px; height: 56px;
-        border-radius: 50%; background: #0073aa; color: #fff; display: flex;
-        align-items: center; justify-content: center; font-weight: 700; font-size: 22px;
-        box-shadow: 0 8px 24px rgba(0,0,0,.18); cursor: pointer; z-index: 10000;
-        user-select: none;
+        border-radius: 50%; background: var(--chat-accent); color: #fff; display: grid;
+        place-items: center; font-weight: 700; font-size: 22px;
+        box-shadow: 0 8px 24px rgba(0,0,0,.18); cursor: pointer; z-index: 100000;
+        user-select: none; transition: transform .2s ease;
       }
+      #chatbot-launcher:active { transform: scale(0.98); }
+      #chatbot-launcher[data-unread]:after{
+        content: attr(data-unread);
+        position:absolute; top:-6px; right:-6px; min-width:18px; height:18px;
+        padding:0 5px; border-radius:999px; background:#ff3b30; color:#fff;
+        font-size:12px; line-height:18px; text-align:center; box-shadow:0 1px 4px rgba(0,0,0,.2);
+      }
+
       #chatbot-container {
         position: fixed; bottom: 90px; right: 20px; width: 340px; height: 460px; background: #fff;
         border: 1px solid #dcdcdc; border-radius: 14px; display: none; flex-direction: column;
         font-family: system-ui, Arial, sans-serif; z-index: 10001; box-shadow: 0 8px 24px rgba(0,0,0,.12);
         overflow: hidden;
       }
+      #chatbot-container[aria-hidden="true"] { display: none !important; }
+
       .chatbot-header {
-        display:flex; align-items:center; justify-content:space-between; background:#0073aa; color:#fff;
-        padding:10px 12px; font-weight:600; cursor: pointer; position: relative;
+        display:flex; align-items:center; justify-content:space-between; background: var(--chat-accent); color:#fff;
+        padding:10px 12px; font-weight:600; position: relative;
       }
+      .chatbot-title { display:flex; align-items:center; gap:8px; }
       .chatbot-icon-btn {
         display:inline-flex; align-items:center; justify-content:center;
         width:28px; height:28px; margin-left:8px; background: transparent; border: none; color:#fff;
@@ -63,31 +82,31 @@ function chatbot_widget_inject() {
       .chatbot-icon-btn:hover { background: rgba(255,255,255,.15); }
 
       #chatbot-usage-bar { height:6px;background:#f0f0f0; }
-      #chatbot-usage-fill { height:100%;width:0%;background:#0073aa;transition:width .3s; }
+      #chatbot-usage-fill { height:100%;width:0%;background:var(--chat-accent);transition:width .3s; }
 
       #chatbot-messages { flex:1; overflow-y:auto; padding:12px; background:#f9fafb; font-size:14px; }
       .chatbot-footer { display:flex; gap:6px; border-top:1px solid #eee; padding:8px; background:#fff; }
       .chatbot-input { flex:1; padding:10px; border:1px solid #ddd; border-radius:10px; outline:none; }
-      .chatbot-btn { padding:10px 12px; border:none; background:#0073aa; color:#fff; border-radius:10px; cursor:pointer; }
+      .chatbot-btn { padding:10px 12px; border:none; background:var(--chat-accent); color:#fff; border-radius:10px; cursor:pointer; }
       .chatbot-btn-secondary { padding:10px; border:1px solid #ddd; background:#fff; color:#333; border-radius:10px; cursor:pointer; }
       .chatbot-hint { text-align:center; font-size:11px; color:#777; padding:6px 0; background:#fafafa; }
-      .chatbot-hint a { color:#0073aa; text-decoration:underline; }
+      .chatbot-hint a { color:var(--chat-accent); text-decoration:underline; }
 
       .bubble-wrap { margin: 6px 0; }
       .bubble { display:inline-block; max-width:85%; padding:8px 10px; border-radius:12px; white-space: pre-wrap; word-break: break-word; }
-      .bubble-user { background:#0073aa; color:#fff; }
+      .bubble-user { background:#1f2937; color:#fff; }
       .bubble-bot { background:#e5e7eb; color:#111; }
 
-      #chatbot-container[aria-hidden="true"] { display: none !important; }
-      #chatbot-launcher[aria-hidden="true"] { display: none !important; }
+      /* Tiny inline SVG in launcher controlled by JS (paths) */
+      .svg-ico { width:24px; height:24px; display:block; }
     </style>
 
     <script>
     // ---- Config (from WP Settings)
     const BACKEND = "<?php echo $backend_js; ?>";
-    const API_URL = BACKEND + "/chat";
-    const CLEAR_URL = BACKEND + "/chat/clear";
-    const ANALYTICS_URL = BACKEND + "/analytics";
+    const API_URL = BACKEND.replace(/\/+$/,'') + "/chat";
+    const CLEAR_URL = BACKEND.replace(/\/+$/,'') + "/chat/clear";
+    const ANALYTICS_URL = BACKEND.replace(/\/+$/,'') + "/analytics";
 
     const TENANT_ID = "<?php echo $tenant_js; ?>";
     const PLAN = "<?php echo $plan_js; ?>"; // "rule" | "ai" | "enterprise"
@@ -130,19 +149,23 @@ function chatbot_widget_inject() {
     }
     </script>
 
-    <!-- Launcher -->
-    <div id="chatbot-launcher" aria-label="Open chat" title="Chat">💬</div>
+    <!-- Launcher (always visible) -->
+    <div id="chatbot-launcher" aria-expanded="false" aria-label="Open chat" title="Open chat" role="button" tabindex="0">
+      <svg class="svg-ico" viewBox="0 0 24 24" aria-hidden="true">
+        <!-- JS swaps this path: bubble (open) ↔ bar (minimize) -->
+        <path id="chatbot-launcher-path" d="M4 4h16v12H7l-3 3V4z" fill="currentColor"></path>
+      </svg>
+    </div>
 
     <!-- Widget -->
-    <div id="chatbot-container" role="dialog" aria-label="Chatbot">
+    <div id="chatbot-container" role="dialog" aria-label="<?php echo esc_attr($botname_html); ?>" aria-hidden="true">
         <div class="chatbot-header" id="chatbot-header">
-            <div style="display:flex;align-items:center;gap:8px;">
-              <span>Chatbot</span>
-              <!-- no plan badge -->
+            <div class="chatbot-title">
+              <span id="chatbot-title"><?php echo $botname_html; ?></span>
             </div>
             <button id="chatbot-minimize" class="chatbot-icon-btn" aria-label="Minimize chat" title="Minimize" type="button">
               <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
-                <path fill="currentColor" d="M7.41 8.58L12 13.17l4.59-4.59L18 10l-6 6-6-6z"/>
+                <path fill="currentColor" d="M5 12h14v2H5z"/>
               </svg>
             </button>
         </div>
@@ -159,134 +182,160 @@ function chatbot_widget_inject() {
     </div>
 
     <script>
-    const launcher = document.getElementById("chatbot-launcher");
-    const container = document.getElementById("chatbot-container");
-    const header = document.getElementById("chatbot-header");
-    const minimizeBtn = document.getElementById("chatbot-minimize");
+    (function(){
+      const launcher = document.getElementById("chatbot-launcher");
+      const launcherPath = document.getElementById("chatbot-launcher-path");
+      const container = document.getElementById("chatbot-container");
+      const header = document.getElementById("chatbot-header");
+      const minimizeBtn = document.getElementById("chatbot-minimize");
 
-    const messagesDiv = document.getElementById("chatbot-messages");
-    const input = document.getElementById("chatbot-input");
-    const sendBtn = document.getElementById("chatbot-send");
-    const clearBtn = document.getElementById("chatbot-clear");
-    const usageFill = document.getElementById("chatbot-usage-fill");
-    const hint = document.getElementById("tiny-hint");
+      const messagesDiv = document.getElementById("chatbot-messages");
+      const input = document.getElementById("chatbot-input");
+      const sendBtn = document.getElementById("chatbot-send");
+      const clearBtn = document.getElementById("chatbot-clear");
+      const usageFill = document.getElementById("chatbot-usage-fill");
+      const hint = document.getElementById("tiny-hint");
+      const titleEl = document.getElementById("chatbot-title");
 
-    function bubble(sender, text){
-        const wrap = document.createElement("div");
-        wrap.className = "bubble-wrap";
-        const msg = document.createElement("div");
-        msg.textContent = text;
-        msg.className = "bubble " + (sender === "You" ? "bubble-user" : "bubble-bot");
-        if (sender === "You") wrap.style.textAlign = "right";
-        wrap.appendChild(msg);
-        messagesDiv.appendChild(wrap);
-        messagesDiv.scrollTop = messagesDiv.scrollHeight;
-    }
+      // icons
+      const PATH_OPEN = "M4 4h16v12H7l-3 3V4z"; // bubble = means "open chat"
+      const PATH_MIN  = "M5 12h14v2H5z";        // bar = means "minimize"
 
-    function setUsage(used, limit){
-        if (!limit || limit <= 0) { usageFill.style.width = "0%"; return; }
-        const pct = Math.min(100, Math.round((used / limit) * 100));
-        usageFill.style.width = pct + "%";
-    }
+      function setLauncherIcon(openState){
+        launcherPath.setAttribute("d", openState ? PATH_MIN : PATH_OPEN);
+        launcher.setAttribute("aria-label", openState ? "Minimize chat" : "Open chat");
+        launcher.setAttribute("title", openState ? "Minimize chat" : "Open chat");
+        launcher.setAttribute("aria-expanded", String(openState));
+        if (openState) launcher.removeAttribute("data-unread");
+      }
 
-    function typing(on){
-        const id = "typing-indicator";
-        let el = document.getElementById(id);
-        if (on) {
-            if (el) return;
-            el = document.createElement("div");
-            el.id = id;
-            el.className = "bubble-wrap";
-            el.innerHTML = '<div class="bubble bubble-bot">…</div>';
-            messagesDiv.appendChild(el);
-            messagesDiv.scrollTop = messagesDiv.scrollHeight;
-        } else if (el) {
-            el.remove();
+      function bubble(sender, text){
+          const wrap = document.createElement("div");
+          wrap.className = "bubble-wrap";
+          const msg = document.createElement("div");
+          msg.textContent = text;
+          msg.className = "bubble " + (sender === "You" ? "bubble-user" : "bubble-bot");
+          if (sender === "You") wrap.style.textAlign = "right";
+          wrap.appendChild(msg);
+          messagesDiv.appendChild(wrap);
+          messagesDiv.scrollTop = messagesDiv.scrollHeight;
+      }
+
+      function setUsage(used, limit){
+          if (!limit || limit <= 0) { usageFill.style.width = "0%"; return; }
+          const pct = Math.min(100, Math.round((used / limit) * 100));
+          usageFill.style.width = pct + "%";
+      }
+
+      function typing(on){
+          const id = "typing-indicator";
+          let el = document.getElementById(id);
+          if (on) {
+              if (el) return;
+              el = document.createElement("div");
+              el.id = id;
+              el.className = "bubble-wrap";
+              el.innerHTML = '<div class="bubble bubble-bot">…</div>';
+              messagesDiv.appendChild(el);
+              messagesDiv.scrollTop = messagesDiv.scrollHeight;
+          } else if (el) {
+              el.remove();
+          }
+      }
+
+      function showWidget() {
+        container.style.display = "flex";
+        container.setAttribute("aria-hidden", "false");
+        setLauncherIcon(true); // launcher stays visible, shows "minimize" icon
+        setWidgetState("max");
+        setTimeout(() => input?.focus(), 50);
+      }
+      function hideWidget() {
+        container.style.display = "none";
+        container.setAttribute("aria-hidden", "true");
+        setLauncherIcon(false); // launcher shows "open" icon
+        setWidgetState("min");
+      }
+
+      function toggleWidget(){
+        const open = container.getAttribute("aria-hidden") === "false";
+        if (open) hideWidget(); else showWidget();
+      }
+
+      // Initialize min/max based on saved state (default: minimized)
+      if (getWidgetState() === "max") { showWidget(); } else { hideWidget(); }
+
+      // Toggle from header double-click (keep header single click inert to avoid accidental closes)
+      header.addEventListener("dblclick", toggleWidget);
+      // explicit minimize button
+      minimizeBtn?.addEventListener("click", (e) => { e.stopPropagation(); hideWidget(); });
+      // launcher: click or keyboard
+      launcher.addEventListener("click", toggleWidget);
+      launcher.addEventListener("keydown", (e)=>{ if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleWidget(); } });
+
+      // ESC to minimize when open
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && container.getAttribute("aria-hidden") === "false") hideWidget();
+      });
+
+      // Load persisted conversation
+      const history = loadHistory();
+      if (history.length) { history.forEach(h => bubble(h.sender, h.text)); }
+
+      async function handleSend(){
+          const text = input.value.trim();
+          if (!text) return;
+          bubble("You", text);
+          const hist = loadHistory(); hist.push({ sender:"You", text }); saveHistory(hist);
+          input.value = ""; input.focus();
+          typing(true);
+          try {
+              const data = await sendMessage(text);
+              typing(false);
+
+              const replyText = String(data.reply ?? "");
+              // If minimized (rare while sending), badge it
+              if (container.getAttribute("aria-hidden") === "true") {
+                const current = Number(launcher.getAttribute("data-unread") || 0) + 1;
+                launcher.setAttribute("data-unread", String(current));
+              }
+              bubble("Bot", replyText);
+
+              const h2 = loadHistory(); h2.push({ sender:"Bot", text: replyText }); saveHistory(h2);
+
+              setUsage(data.usage, data.limit);
+              if (data.limit && data.usage >= data.limit) {
+                  input.disabled = true; sendBtn.disabled = true;
+                  hint.innerHTML = 'Limit reached. Powered by <a href="https://www.nubedy.com/chat" target="_blank" rel="noopener">Nubedy</a>';
+              }
+          } catch (e) {
+              typing(false);
+              bubble("Bot", "⚠️ Error connecting to server.");
+              const h3 = loadHistory(); h3.push({ sender:"Bot", text:"⚠️ Error connecting to server." }); saveHistory(h3);
+          }
+      }
+
+      sendBtn.addEventListener("click", handleSend);
+      input.addEventListener("keypress", (e) => { if (e.key === "Enter") handleSend(); });
+
+      clearBtn.addEventListener("click", async () => {
+          try { await clearChat(false); } catch {}
+          localStorage.removeItem(STORAGE_KEY);
+          messagesDiv.innerHTML = "";
+          input.disabled = false; sendBtn.disabled = false;
+          setUsage(0, 0);
+          bubble("Bot", "Chat cleared. How can I help?");
+      });
+
+      // Expose a small hook so you can push messages externally if needed
+      window.__chatbot_pushMessage = function(text){
+        if (container.getAttribute("aria-hidden") === "true") {
+          const current = Number(launcher.getAttribute("data-unread") || 0) + 1;
+          launcher.setAttribute("data-unread", String(current));
         }
-    }
-
-    function showWidget() {
-      container.style.display = "flex";
-      container.setAttribute("aria-hidden", "false");
-      launcher.style.display = "none";
-      launcher.setAttribute("aria-hidden", "true");
-      setWidgetState("max");
-      setTimeout(() => input?.focus(), 50);
-    }
-    function hideWidget() {
-      container.style.display = "none";
-      container.setAttribute("aria-hidden", "true");
-      launcher.style.display = "flex";
-      launcher.setAttribute("aria-hidden", "false");
-      setWidgetState("min");
-    }
-
-    // Initialize min/max based on saved state (default: minimized)
-    if (getWidgetState() === "max") { showWidget(); } else { hideWidget(); }
-
-    // Toggle from header click or launcher
-    header.addEventListener("click", () => {
-      const isHidden = container.style.display === "none";
-      if (isHidden) showWidget(); else hideWidget();
-    });
-    launcher.addEventListener("click", showWidget);
-
-    // explicit minimize button (doesn't bubble to header)
-    minimizeBtn?.addEventListener("click", (e) => {
-      e.stopPropagation();
-      hideWidget();
-    });
-
-    // ESC to minimize when open
-    document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape" && container.style.display !== "none") hideWidget();
-    });
-
-    // Load persisted conversation
-    const history = loadHistory();
-    if (history.length) { history.forEach(h => bubble(h.sender, h.text)); }
-
-    async function handleSend(){
-        const text = input.value.trim();
-        if (!text) return;
-        bubble("You", text);
-        const hist = loadHistory(); hist.push({ sender:"You", text }); saveHistory(hist);
-        input.value = ""; input.focus();
-        typing(true);
-        try {
-            const data = await sendMessage(text);
-            typing(false);
-
-            // No usage text in chat
-            const replyText = String(data.reply ?? "");
-            bubble("Bot", replyText);
-
-            const h2 = loadHistory(); h2.push({ sender:"Bot", text: replyText }); saveHistory(h2);
-
-            // Keep usage bar/limit logic (not shown in message bubbles)
-            setUsage(data.usage, data.limit);
-            if (data.limit && data.usage >= data.limit) {
-                input.disabled = true; sendBtn.disabled = true;
-                hint.innerHTML = 'Limit reached. Powered by <a href="https://www.nubedy.com/chat" target="_blank" rel="noopener">Nubedy</a>';
-            }
-        } catch (e) {
-            typing(false);
-            bubble("Bot", "⚠️ Error connecting to server.");
-            const h3 = loadHistory(); h3.push({ sender:"Bot", text:"⚠️ Error connecting to server." }); saveHistory(h3);
-        }
-    }
-
-    sendBtn.addEventListener("click", handleSend);
-    input.addEventListener("keypress", (e) => { if (e.key === "Enter") handleSend(); });
-
-    clearBtn.addEventListener("click", async () => {
-        try { await clearChat(false); } catch {}
-        localStorage.removeItem(STORAGE_KEY);
-        messagesDiv.innerHTML = "";
-        input.disabled = false; sendBtn.disabled = false;
-        setUsage(0, 0);
-        bubble("Bot", "Chat cleared. How can I help?");
-    });
+        bubble("Bot", text);
+      };
+    })();
     </script>
   <?php
 }
@@ -313,6 +362,9 @@ add_action('admin_init', function () {
   register_setting('chatbot_settings', 'chatbot_base_url',   ['type'=>'string','sanitize_callback'=>'esc_url_raw']);
   register_setting('chatbot_settings', 'chatbot_max_pages',  ['type'=>'string','sanitize_callback'=>'sanitize_text_field']);
   register_setting('chatbot_settings', 'chatbot_plan',       ['type'=>'string','sanitize_callback'=>'sanitize_text_field']);
+  // NEW: per-site theming
+  register_setting('chatbot_settings', 'chatbot_bot_name',   ['type'=>'string','sanitize_callback'=>'sanitize_text_field']);
+  register_setting('chatbot_settings', 'chatbot_color',      ['type'=>'string','sanitize_callback'=>'sanitize_hex_color']);
 });
 
 // ------------------------------
@@ -460,10 +512,15 @@ function chatbot_settings_page() {
   $maxpg   = nubedy_chatbot_get_option('chatbot_max_pages', '120');
   $plan    = nubedy_chatbot_get_option('chatbot_plan', 'ai');
 
+  $botname = nubedy_chatbot_get_option('chatbot_bot_name', 'Chatbot');
+  $color   = nubedy_chatbot_get_option('chatbot_color', '#0073aa');
+
   $backend_esc = esc_attr($backend);
   $tenant_esc  = esc_attr($tenant);
   $baseurl_esc = esc_attr($baseurl);
   $maxpg_esc   = esc_attr($maxpg);
+  $botname_esc = esc_attr($botname);
+  $color_esc   = esc_attr($color);
   ?>
   <div class="wrap">
     <h1>Chatbot Settings & Site Indexing</h1>
@@ -480,14 +537,6 @@ function chatbot_settings_page() {
           <td><input name="chatbot_tenant_id" id="chatbot_tenant_id" type="text" class="regular-text" value="<?php echo $tenant_esc; ?>" placeholder="client-123"></td>
         </tr>
         <tr>
-          <th scope="row"><label for="chatbot_base_url">Client Base URL</label></th>
-          <td><input name="chatbot_base_url" id="chatbot_base_url" type="url" class="regular-text" value="<?php echo $baseurl_esc; ?>" placeholder="https://clientsite.com"></td>
-        </tr>
-        <tr>
-          <th scope="row"><label for="chatbot_max_pages">Max Pages to Index</label></th>
-          <td><input name="chatbot_max_pages" id="chatbot_max_pages" type="number" class="small-text" value="<?php echo $maxpg_esc; ?>" min="1" max="500"> <span class="description">Defaults to 120</span></td>
-        </tr>
-        <tr>
           <th scope="row"><label for="chatbot_plan">Default Plan</label></th>
           <td>
             <select name="chatbot_plan" id="chatbot_plan">
@@ -496,6 +545,28 @@ function chatbot_settings_page() {
               <option value="enterprise" <?php selected($plan, 'enterprise'); ?>>Enterprise</option>
             </select>
           </td>
+        </tr>
+
+        <tr><th colspan="2"><hr></th></tr>
+
+        <tr>
+          <th scope="row"><label for="chatbot_bot_name">Bot Name</label></th>
+          <td><input name="chatbot_bot_name" id="chatbot_bot_name" type="text" class="regular-text" value="<?php echo $botname_esc; ?>" placeholder="Nuby Assistant"></td>
+        </tr>
+        <tr>
+          <th scope="row"><label for="chatbot_color">Accent Color</label></th>
+          <td><input name="chatbot_color" id="chatbot_color" type="color" value="<?php echo $color_esc; ?>"></td>
+        </tr>
+
+        <tr><th colspan="2"><hr></th></tr>
+
+        <tr>
+          <th scope="row"><label for="chatbot_base_url">Client Base URL</label></th>
+          <td><input name="chatbot_base_url" id="chatbot_base_url" type="url" class="regular-text" value="<?php echo $baseurl_esc; ?>" placeholder="https://clientsite.com"></td>
+        </tr>
+        <tr>
+          <th scope="row"><label for="chatbot_max_pages">Max Pages to Index</label></th>
+          <td><input name="chatbot_max_pages" id="chatbot_max_pages" type="number" class="small-text" value="<?php echo $maxpg_esc; ?>" min="1" max="500"> <span class="description">Defaults to 120</span></td>
         </tr>
       </table>
       <?php submit_button('Save Settings'); ?>
@@ -531,11 +602,6 @@ function chatbot_settings_page() {
 
   <script>
   (function(){
-    const backend = document.getElementById('chatbot_backend_url').value || '<?php echo esc_js($backend); ?>';
-    const tenant  = document.getElementById('chatbot_tenant_id').value || '<?php echo esc_js($tenant); ?>';
-    const baseUrl = document.getElementById('chatbot_base_url').value || '<?php echo esc_js($baseurl); ?>';
-    const maxPages = document.getElementById('chatbot_max_pages').value || '<?php echo esc_js($maxpg); ?>';
-
     function getVals(){
       return {
         backend: document.getElementById('chatbot_backend_url').value.trim(),
