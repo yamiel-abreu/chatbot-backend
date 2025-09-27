@@ -167,5 +167,31 @@ V 2.8.0
 Not big updates. Just alignment with the backend side. 
 
 
-V2.9.1(2)
+V2.9.2
 
+What changed
+
+Backend 2.9.2:
+Friendlier, sales-oriented system prompt (still strictly grounded).
+Auto-appends a “You may like:” block with up to 3 product bullets using markdown links [Name](URL) + optional price.
+Expanded product intent triggers a bit (gift, category words).
+Health/version bumped to 2.9.2.
+
+Frontend 2.9.2:
+Safe link rendering in chat bubbles:
+Supports [label](https://link) and plain https://link.
+Escapes all other HTML.
+Launcher circle stays visible while the chat is open and toggles icon (open/minimize).
+Theme & bot name settings remain (color applies to header + buttons).
+
+Upload products. How it behaves now
+Manual “Sync Woo ➜ Backend”: exports products filtered by your settings (categories, only visible, only in stock), compares hashes, and uploads only changed ones.
+Nightly Auto-sync: same logic, runs daily (~02:15) if enabled.
+On Save Auto-sync: single-product push, only if changed.
+REST Preview (/wp-json/chatbot/v1/products?limit=10): shows the changed products that would be uploaded with your current filters.
+
+Filters:
+Categories: add slugs like rings,necklaces in Settings.
+Only visible: includes products with catalog visibility not hidden.
+Only in stock: excludes products that WooCommerce reports as out of stock.
+Published only is enforced.
