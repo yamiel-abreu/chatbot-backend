@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Chatbot Widget + Analytics + Site Indexing
  * Description: Floating chatbot widget grounded on your website via RAG, with admin analytics, settings, site indexing, and product feed upload.
- * Version: 2.9.0
+ * Version: 2.9.2
  * Author: YAA
  */
 
@@ -21,7 +21,7 @@ register_activation_hook(__FILE__, function () {
   add_option('chatbot_base_url', get_site_url());
   add_option('chatbot_max_pages', '120');
   add_option('chatbot_plan', 'ai'); // rule | ai | enterprise
-  // NEW: theming defaults
+  // theming defaults
   add_option('chatbot_bot_name', 'Chatbot');
   add_option('chatbot_color', '#0073aa');
 });
@@ -195,7 +195,6 @@ function chatbot_widget_inject() {
       const clearBtn = document.getElementById("chatbot-clear");
       const usageFill = document.getElementById("chatbot-usage-fill");
       const hint = document.getElementById("tiny-hint");
-      const titleEl = document.getElementById("chatbot-title");
 
       // icons
       const PATH_OPEN = "M4 4h16v12H7l-3 3V4z"; // bubble = means "open chat"
@@ -209,13 +208,51 @@ function chatbot_widget_inject() {
         if (openState) launcher.removeAttribute("data-unread");
       }
 
+      // SAFE renderer: supports [label](url) and bare URLs; escapes everything else
+      function renderRichTextToFragment(text) {
+        const safe = (text || "").replace(/[&<>]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[ch]));
+        const frag = document.createDocumentFragment();
+        const mdLink = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g;
+        const urlRe  = /(https?:\/\/[^\s)]+)(?![^[]*\))/g;
+
+        let last = 0, m;
+        const parts = [];
+        while ((m = mdLink.exec(safe)) !== null) {
+          if (m.index > last) parts.push({t:"text",v:safe.slice(last, m.index)});
+          parts.push({t:"link",label:m[1],href:m[2]});
+          last = mdLink.lastIndex;
+        }
+        if (last < safe.length) parts.push({t:"text",v:safe.slice(last)});
+
+        parts.forEach(p => {
+          if (p.t === "link") {
+            const a = document.createElement("a");
+            a.href = p.href; a.textContent = p.label; a.target = "_blank"; a.rel = "nofollow noopener";
+            frag.appendChild(a);
+            return;
+          }
+          let start = 0, mm, chunk = p.v;
+          while ((mm = urlRe.exec(chunk)) !== null) {
+            if (mm.index > start) frag.appendChild(document.createTextNode(chunk.slice(start, mm.index)));
+            const a = document.createElement("a");
+            a.href = mm[1]; a.textContent = mm[1]; a.target = "_blank"; a.rel = "nofollow noopener";
+            frag.appendChild(a);
+            start = urlRe.lastIndex;
+          }
+          if (start < chunk.length) frag.appendChild(document.createTextNode(chunk.slice(start)));
+        });
+
+        return frag;
+      }
+
       function bubble(sender, text){
           const wrap = document.createElement("div");
           wrap.className = "bubble-wrap";
           const msg = document.createElement("div");
-          msg.textContent = text;
           msg.className = "bubble " + (sender === "You" ? "bubble-user" : "bubble-bot");
           if (sender === "You") wrap.style.textAlign = "right";
+          // SAFE rich text
+          msg.appendChild(renderRichTextToFragment(text));
           wrap.appendChild(msg);
           messagesDiv.appendChild(wrap);
           messagesDiv.scrollTop = messagesDiv.scrollHeight;
@@ -265,9 +302,8 @@ function chatbot_widget_inject() {
       // Initialize min/max based on saved state (default: minimized)
       if (getWidgetState() === "max") { showWidget(); } else { hideWidget(); }
 
-      // Toggle from header double-click (keep header single click inert to avoid accidental closes)
+      // Header dblclick toggles; minimize button explicitly hides
       header.addEventListener("dblclick", toggleWidget);
-      // explicit minimize button
       minimizeBtn?.addEventListener("click", (e) => { e.stopPropagation(); hideWidget(); });
       // launcher: click or keyboard
       launcher.addEventListener("click", toggleWidget);
@@ -294,7 +330,6 @@ function chatbot_widget_inject() {
               typing(false);
 
               const replyText = String(data.reply ?? "");
-              // If minimized (rare while sending), badge it
               if (container.getAttribute("aria-hidden") === "true") {
                 const current = Number(launcher.getAttribute("data-unread") || 0) + 1;
                 launcher.setAttribute("data-unread", String(current));
@@ -327,7 +362,7 @@ function chatbot_widget_inject() {
           bubble("Bot", "Chat cleared. How can I help?");
       });
 
-      // Expose a small hook so you can push messages externally if needed
+      // Optional hook to push messages programmatically
       window.__chatbot_pushMessage = function(text){
         if (container.getAttribute("aria-hidden") === "true") {
           const current = Number(launcher.getAttribute("data-unread") || 0) + 1;
@@ -362,7 +397,7 @@ add_action('admin_init', function () {
   register_setting('chatbot_settings', 'chatbot_base_url',   ['type'=>'string','sanitize_callback'=>'esc_url_raw']);
   register_setting('chatbot_settings', 'chatbot_max_pages',  ['type'=>'string','sanitize_callback'=>'sanitize_text_field']);
   register_setting('chatbot_settings', 'chatbot_plan',       ['type'=>'string','sanitize_callback'=>'sanitize_text_field']);
-  // NEW: per-site theming
+  // per-site theming
   register_setting('chatbot_settings', 'chatbot_bot_name',   ['type'=>'string','sanitize_callback'=>'sanitize_text_field']);
   register_setting('chatbot_settings', 'chatbot_color',      ['type'=>'string','sanitize_callback'=>'sanitize_hex_color']);
 });
@@ -439,7 +474,7 @@ function chatbot_analytics_page() {
                 tbody.appendChild(tr);
             });
 
-            // ---- Build usage summary per user (latest aiCalls + plan + last seen + limit)
+            // ---- Build usage summary per user
             const perUser = {};
             for (const l of logs) {
               const u = l.userId || 'unknown';

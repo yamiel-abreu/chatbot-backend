@@ -1,5 +1,5 @@
 // server.js
-// v2.9.0
+// v2.9.2
 // Author: YAA
 
 import express from "express";
@@ -10,6 +10,7 @@ import fetch from "node-fetch";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { parse as csvParse } from "csv-parse/sync"; // robust CSV parser
 
 // ----- ESM dirname helpers -----
 const __filename = fileURLToPath(import.meta.url);
@@ -296,14 +297,14 @@ async function embedBatch(texts, batchSize = EMB_BATCH) {
   return out;
 }
 
-function cosineSim(a, b) {
-  let dot = 0, na = 0, nb = 0;
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-    na += a[i] * a[i];
-    nb += b[i] * b[i];
-  }
-  return dot / (Math.sqrt(na) * Math.sqrt(nb) + 1e-12);
+function toF32Normalized(vec) {
+  if (!Array.isArray(vec)) return new Float32Array(0);
+  let sum = 0;
+  for (let i = 0; i < vec.length; i++) sum += vec[i] * vec[i];
+  const norm = Math.sqrt(sum) || 1;
+  const out = new Float32Array(vec.length);
+  for (let i = 0; i < vec.length; i++) out[i] = vec[i] / norm;
+  return out;
 }
 
 // ==========================
@@ -316,16 +317,6 @@ const CACHE_QUERY_TTL_MS  = Number(process.env.CACHE_QUERY_TTL_MS  ?? 5 * 60 * 1
 const TENANT_EMB_CACHE  = new Map(); // tenantId -> {mtime, last, chunks:[{url,text,vec:Float32Array}], dim}
 const TENANT_PROD_CACHE = new Map(); // tenantId -> {mtime, last, products, emb:[Float32Array], dim}
 const QUERY_EMB_CACHE   = new Map(); // key -> {vec:Float32Array, t, last}
-
-function toF32Normalized(vec) {
-  if (!Array.isArray(vec)) return new Float32Array(0);
-  let sum = 0;
-  for (let i = 0; i < vec.length; i++) sum += vec[i] * vec[i];
-  const norm = Math.sqrt(sum) || 1;
-  const out = new Float32Array(vec.length);
-  for (let i = 0; i < vec.length; i++) out[i] = vec[i] / norm;
-  return out;
-}
 
 function dot(a, b) {
   const len = Math.min(a.length, b.length);
@@ -567,6 +558,99 @@ function findFAQReply(message) {
 }
 
 // ===================
+// CSV helpers (v2.9.1+)
+// ===================
+function detectDelimiter(text) {
+  const semi = (text.match(/;/g) || []).length;
+  const comma = (text.match(/,/g) || []).length;
+  return semi > comma ? ";" : ",";
+}
+
+function firstNonEmpty(str, seps = [",", "|", ";"]) {
+  if (!str) return "";
+  for (const s of seps) {
+    if (str.includes(s)) {
+      const parts = str.split(s).map(v => v.trim()).filter(Boolean);
+      if (parts.length) return parts[0];
+    }
+  }
+  return String(str).trim();
+}
+
+function pick(row, aliases) {
+  const keys = Object.keys(row);
+  for (const name of aliases) {
+    const k = keys.find(kk => kk.toLowerCase() === name.toLowerCase());
+    if (k && row[k] != null && String(row[k]).trim() !== "") return String(row[k]).trim();
+  }
+  // loose contains match (e.g., "Attribute 1 name: Brand")
+  for (const name of aliases) {
+    const k = keys.find(kk => kk.toLowerCase().includes(name.toLowerCase()));
+    if (k && row[k] != null && String(row[k]).trim() !== "") return String(row[k]).trim();
+  }
+  return "";
+}
+
+function parsePriceCurrency(rawVal, explicitCurrency = "") {
+  const v = String(rawVal || "").trim();
+  if (!v) return { price: "", currency: explicitCurrency || "" };
+
+  const symbolMap = {"€":"EUR","$":"USD","£":"GBP","CHF":"CHF","zł":"PLN","¥":"JPY","C$":"CAD","A$":"AUD"};
+  const cleaned = v.replace(/\s/g, "");
+  let cur = explicitCurrency || "";
+
+  const isoMatch = cleaned.match(/\b(EUR|USD|GBP|CHF|PLN|JPY|CAD|AUD|NZD|SEK|NOK|DKK|CZK)\b/i);
+  if (isoMatch) cur = isoMatch[1].toUpperCase();
+  if (!cur) {
+    const sym = Object.keys(symbolMap).find(s => cleaned.includes(s));
+    if (sym) cur = symbolMap[sym];
+  }
+
+  const numMatch = cleaned.match(/-?\d{1,3}(\.\d{3})*(,\d+)?|-?\d+(?:\.\d+)?/g);
+  let num = numMatch ? numMatch[numMatch.length - 1] : "";
+  if (num && num.includes(",") && !num.includes(".")) {
+    num = num.replace(/\./g, "").replace(",", ".");
+  } else if (num) {
+    const parts = num.split(".");
+    if (parts.length > 2) { const last = parts.pop(); num = parts.join("") + "." + last; }
+    num = num.replace(/,/g, "");
+  }
+  return { price: num, currency: cur };
+}
+
+// Normalize Woo/WordPress rows to our schema
+function normalizeItemFromRow(row) {
+  // Common headers (sample): SKU, Name, "Short description", "Regular price", "External URL", Brands
+  const sku         = pick(row, ["SKU", "sku", "_sku", "product code"]);
+  const name        = pick(row, ["Name", "name", "title", "post_title", "product name"]);
+  const description = pick(row, ["Short description", "short description", "Description", "description", "Excerpt", "excerpt", "post_content"]);
+  const url         = pick(row, ["External URL", "external url", "Permalink", "permalink", "URL", "url", "Link", "link", "Product URL"]);
+  const brand       = pick(row, ["Brands", "Brand", "brand", "pa_brand", "attribute:brand", "attribute 1 value"]);
+
+  const { price, currency } = parsePriceCurrency(
+    pick(row, ["Regular price", "regular price", "_regular_price", "Sale price", "sale price", "_sale_price", "Price", "price"]),
+    pick(row, ["Currency", "currency"])
+  );
+
+  const image = firstNonEmpty(pick(row, ["Images", "images", "Image", "image", "Image URL", "Featured image", "thumbnail"]));
+
+  return { name, description, url, price, currency, image, sku, brand };
+}
+
+function parseCsvSmart(csvText) {
+  const delimiter = detectDelimiter(csvText);
+  const records = csvParse(csvText, {
+    columns: header => header.map(h => String(h).trim()),
+    delimiter,
+    skip_empty_lines: true,
+    relax_quotes: true,
+    relax_column_count: true,
+    bom: true
+  });
+  return records.map(normalizeItemFromRow);
+}
+
+// ===================
 // Routes
 // ===================
 
@@ -610,16 +694,14 @@ app.post("/products/upload", async (req, res) => {
 
     let items = [];
     if (Array.isArray(req.body?.items)) {
+      // JSON array passthrough
       items = req.body.items;
     } else if (typeof req.body?.csv === "string") {
-      // minimal CSV parser: name,description,url,price,currency,image,sku,brand
-      const lines = req.body.csv.split(/\r?\n/).filter(Boolean);
-      const header = lines.shift()?.split(",").map(s => s.trim().toLowerCase()) || [];
-      for (const line of lines) {
-        const cols = line.split(",").map(s => s.trim());
-        const obj = {};
-        header.forEach((h, i) => obj[h] = cols[i] || "");
-        items.push(obj);
+      // robust CSV support (quotes, newlines, delimiter autodetect, Woo header mapping)
+      try {
+        items = parseCsvSmart(req.body.csv);
+      } catch (e) {
+        return res.status(400).json({ error: "CSV parse failed: " + e.message });
       }
     } else {
       return res.status(400).json({ error: "Provide items[] or csv" });
@@ -627,8 +709,11 @@ app.post("/products/upload", async (req, res) => {
 
     const dir = tenantDir(tenantId);
     const PROD_FILE = path.join(dir, "products.json");
+
     // embed products
-    const texts = items.map(p => `${p.name}\n${p.description}\n${p.brand}\n${p.price} ${p.currency}`.trim());
+    const texts = items.map(p =>
+      `${p.name || ""}\n${p.description || ""}\n${p.brand || ""}\n${(p.price || "")} ${(p.currency || "")}`.trim()
+    );
     const vecs = texts.length ? await embedBatch(texts) : [];
     writeJSON(PROD_FILE, { products: items, emb: vecs });
 
@@ -689,14 +774,12 @@ app.post("/chat", async (req, res) => {
         if (!apiKeyToUse) {
           reply = "⚠️ No API key configured. Please contact support.";
         } else {
-          // ==== Strict grounded answering using RAG ====
-          // Gather site context for this tenant
+          // ==== Friendly, sales-oriented but strictly grounded assistant ====
           let contextBlocks = [];
           let productBlocks = [];
           if (tenantId) {
             contextBlocks = await retrieveContext(tenantId, message, 8);
-            // product intent detection
-            const producty = /\b(product|buy|price|sizes?|colors?|catalog|shop|add to cart|order|stock|available|recommend)\b/i.test(message);
+            const producty = /\b(product|buy|price|sizes?|colors?|catalog|shop|add to cart|order|stock|available|recommend|gift|present|necklace|earrings?|ring|bracelet)\b/i.test(message);
             if (producty) {
               productBlocks = await retrieveProducts(tenantId, message, 6);
             }
@@ -707,10 +790,21 @@ app.post("/chat", async (req, res) => {
             ? "Products:\n" + productBlocks.map((p, i) => `• ${p.name} — ${p.price ? p.price + (p.currency ? " " + p.currency : "") : ""}\n  Link: ${p.url}\n  ${p.description || ""}`).join("\n")
             : "";
 
-          const strictInstruction = `You are a helpful website assistant for the client's site.
-You MUST answer ONLY using the information in "Context" and optionally "Products".
-If the answer is not present in Context, reply exactly with: "I’m not sure based on the site content. Please contact support or check the website."
-Never invent facts. Prefer short, direct answers. Include links only if they are present in Context or Products.`;
+          const strictInstruction = `You are a friendly, concise shopping assistant for an e-commerce website.
+
+GROUNDING RULES (must follow):
+- Only state facts that appear in "Context" and/or "Products". Do not invent details.
+- If the user asks about something not covered, answer exactly: "I’m not sure based on the site content. Please contact support or check the website."
+
+TONE & STYLE:
+- Warm, helpful, and sales-oriented, but not pushy.
+- Prefer short paragraphs or bullets; keep answers scannable.
+- When the user greets you or asks broadly, briefly ask what they’re shopping for (category, style, budget).
+
+PRODUCT BEHAVIOR:
+- If Products are provided and relevant, you may reference them (name, short detail) based ONLY on provided info.
+- Include links only if present in Products/Context.
+- Be clear when info is missing (e.g., "I don’t see sizing info in the content provided.").`;
 
           const messages = [
             { role: "system", content: strictInstruction },
@@ -719,6 +813,16 @@ Never invent facts. Prefer short, direct answers. Include links only if they are
 
           reply = await callGPT(messages, apiKeyToUse);
           usedAI = true;
+
+          // NEW: Friendly product shortlist with clickable names (markdown) if we matched items
+          if (productBlocks && productBlocks.length) {
+            const picks = productBlocks.slice(0, 3);
+            const list = picks.map(p => {
+              const price = p.price ? `${p.price}${p.currency ? " " + p.currency : ""}` : "";
+              return `• [${p.name || "View product"}](${p.url})${price ? " — " + price : ""}`;
+            }).join("\n");
+            reply += `\n\nYou may like:\n${list}\n\nCan I narrow it down for you by style, size, or budget?`;
+          }
 
           // Soft fallback to FAQs if no context and strict reply
           if ((!reply || /I’m not sure based on the site content/i.test(reply)) && !contextBlocks.length) {
@@ -794,8 +898,8 @@ app.get("/faqs", (_req, res) => {
 });
 
 // Healthcheck
-app.get("/", (_req, res) => res.json({ status: "ok", version: "2.9.0" }));
+app.get("/", (_req, res) => res.json({ status: "ok", version: "2.9.2" }));
 
 // Start server
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Chatbot backend v2.9.0 running on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Chatbot backend v2.9.2 running on port ${PORT}`));

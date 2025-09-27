@@ -165,3 +165,7 @@ Analytics page uses the configured Backend URL and shows Plan/Limit/Remaining.
 V 2.8.0
 
 Not big updates. Just alignment with the backend side. 
+
+
+V2.9.1(2)
+
