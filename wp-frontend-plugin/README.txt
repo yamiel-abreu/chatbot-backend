@@ -195,3 +195,21 @@ Categories: add slugs like rings,necklaces in Settings.
 Only visible: includes products with catalog visibility not hidden.
 Only in stock: excludes products that WooCommerce reports as out of stock.
 Published only is enforced.
+
+
+
+V 2.9.3
+
+What’s new in v2.9.3 (plugin)
+
+Woo pagination bug fixed: wc_get_products([ 'paginate' => true ]) is now handled as an array (['products','total','max_num_pages']), so products load correctly.
+Woo ➜ Chatbot Products (Admin):
+Preview (first N) — quick sample of what would be uploaded.
+Sync Woo ➜ Backend — incremental (only changed products); respects filters.
+Force full upload — uploads all matching products regardless of previous sync hashes (re-embeds everything on the backend; useful after bulk edits, theme/taxonomy changes, or embeddings model updates). A short help text is shown next to the button.
+Filters supported (UI + REST):
+Category slugs (comma-separated)
+Only visible (exclude hidden)
+Only in stock
+Only published products are considered.
+All prior features are preserved: floating widget, theming, analytics, site indexing, CSV/JSON product upload tools.
