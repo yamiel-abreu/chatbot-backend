@@ -1,5 +1,5 @@
 // server.js
-// v2.9.2
+// v2.9.4
 // Author: YAA
 
 import express from "express";
@@ -306,6 +306,12 @@ function toF32Normalized(vec) {
   for (let i = 0; i < vec.length; i++) out[i] = vec[i] / norm;
   return out;
 }
+function dot(a, b) {
+  const len = Math.min(a.length, b.length);
+  let d = 0;
+  for (let i = 0; i < len; i++) d += a[i] * b[i];
+  return d; // cosine if inputs are unit-normalized
+}
 
 // ==========================
 // 🔥 CACHING (tenants + query embeddings)
@@ -318,13 +324,6 @@ const TENANT_EMB_CACHE  = new Map(); // tenantId -> {mtime, last, chunks:[{url,t
 const TENANT_PROD_CACHE = new Map(); // tenantId -> {mtime, last, products, emb:[Float32Array], dim}
 const QUERY_EMB_CACHE   = new Map(); // key -> {vec:Float32Array, t, last}
 
-function dot(a, b) {
-  const len = Math.min(a.length, b.length);
-  let d = 0;
-  for (let i = 0; i < len; i++) d += a[i] * b[i];
-  return d; // cosine if inputs are unit-normalized
-}
-
 function lruTouch(map, key, payload) {
   const now = Date.now();
   const val = payload ? { ...payload, last: now } : { ...map.get(key), last: now };
@@ -335,7 +334,6 @@ function lruTouch(map, key, payload) {
     if (oldestKey) map.delete(oldestKey);
   }
 }
-
 function lruTouchQuery(key, vec) {
   const now = Date.now();
   const entry = { vec, t: now, last: now };
@@ -558,14 +556,13 @@ function findFAQReply(message) {
 }
 
 // ===================
-// CSV helpers (v2.9.1+)
+// CSV helpers (Woo/WordPress friendly)
 // ===================
 function detectDelimiter(text) {
   const semi = (text.match(/;/g) || []).length;
   const comma = (text.match(/,/g) || []).length;
   return semi > comma ? ";" : ",";
 }
-
 function firstNonEmpty(str, seps = [",", "|", ";"]) {
   if (!str) return "";
   for (const s of seps) {
@@ -576,36 +573,30 @@ function firstNonEmpty(str, seps = [",", "|", ";"]) {
   }
   return String(str).trim();
 }
-
 function pick(row, aliases) {
   const keys = Object.keys(row);
   for (const name of aliases) {
     const k = keys.find(kk => kk.toLowerCase() === name.toLowerCase());
     if (k && row[k] != null && String(row[k]).trim() !== "") return String(row[k]).trim();
   }
-  // loose contains match (e.g., "Attribute 1 name: Brand")
   for (const name of aliases) {
     const k = keys.find(kk => kk.toLowerCase().includes(name.toLowerCase()));
     if (k && row[k] != null && String(row[k]).trim() !== "") return String(row[k]).trim();
   }
   return "";
 }
-
 function parsePriceCurrency(rawVal, explicitCurrency = "") {
   const v = String(rawVal || "").trim();
   if (!v) return { price: "", currency: explicitCurrency || "" };
-
   const symbolMap = {"€":"EUR","$":"USD","£":"GBP","CHF":"CHF","zł":"PLN","¥":"JPY","C$":"CAD","A$":"AUD"};
   const cleaned = v.replace(/\s/g, "");
   let cur = explicitCurrency || "";
-
   const isoMatch = cleaned.match(/\b(EUR|USD|GBP|CHF|PLN|JPY|CAD|AUD|NZD|SEK|NOK|DKK|CZK)\b/i);
   if (isoMatch) cur = isoMatch[1].toUpperCase();
   if (!cur) {
     const sym = Object.keys(symbolMap).find(s => cleaned.includes(s));
     if (sym) cur = symbolMap[sym];
   }
-
   const numMatch = cleaned.match(/-?\d{1,3}(\.\d{3})*(,\d+)?|-?\d+(?:\.\d+)?/g);
   let num = numMatch ? numMatch[numMatch.length - 1] : "";
   if (num && num.includes(",") && !num.includes(".")) {
@@ -617,26 +608,19 @@ function parsePriceCurrency(rawVal, explicitCurrency = "") {
   }
   return { price: num, currency: cur };
 }
-
-// Normalize Woo/WordPress rows to our schema
 function normalizeItemFromRow(row) {
-  // Common headers (sample): SKU, Name, "Short description", "Regular price", "External URL", Brands
   const sku         = pick(row, ["SKU", "sku", "_sku", "product code"]);
   const name        = pick(row, ["Name", "name", "title", "post_title", "product name"]);
   const description = pick(row, ["Short description", "short description", "Description", "description", "Excerpt", "excerpt", "post_content"]);
   const url         = pick(row, ["External URL", "external url", "Permalink", "permalink", "URL", "url", "Link", "link", "Product URL"]);
   const brand       = pick(row, ["Brands", "Brand", "brand", "pa_brand", "attribute:brand", "attribute 1 value"]);
-
   const { price, currency } = parsePriceCurrency(
     pick(row, ["Regular price", "regular price", "_regular_price", "Sale price", "sale price", "_sale_price", "Price", "price"]),
     pick(row, ["Currency", "currency"])
   );
-
   const image = firstNonEmpty(pick(row, ["Images", "images", "Image", "image", "Image URL", "Featured image", "thumbnail"]));
-
   return { name, description, url, price, currency, image, sku, brand };
 }
-
 function parseCsvSmart(csvText) {
   const delimiter = detectDelimiter(csvText);
   const records = csvParse(csvText, {
@@ -694,10 +678,8 @@ app.post("/products/upload", async (req, res) => {
 
     let items = [];
     if (Array.isArray(req.body?.items)) {
-      // JSON array passthrough
       items = req.body.items;
     } else if (typeof req.body?.csv === "string") {
-      // robust CSV support (quotes, newlines, delimiter autodetect, Woo header mapping)
       try {
         items = parseCsvSmart(req.body.csv);
       } catch (e) {
@@ -710,14 +692,12 @@ app.post("/products/upload", async (req, res) => {
     const dir = tenantDir(tenantId);
     const PROD_FILE = path.join(dir, "products.json");
 
-    // embed products
     const texts = items.map(p =>
       `${p.name || ""}\n${p.description || ""}\n${p.brand || ""}\n${(p.price || "")} ${(p.currency || "")}`.trim()
     );
     const vecs = texts.length ? await embedBatch(texts) : [];
     writeJSON(PROD_FILE, { products: items, emb: vecs });
 
-    // Invalidate product cache for this tenant
     TENANT_PROD_CACHE.delete(tenantId);
 
     res.json({ ok: true, products: items.length });
@@ -738,20 +718,16 @@ app.get("/products", (req, res) => {
 // POST /chat
 app.post("/chat", async (req, res) => {
   const userId = (req.headers["x-user-id"] || "").toString() || uuidv4();
-  const tenantId = (req.headers["x-tenant-id"] || "").toString().trim(); // which site to ground on
+  const tenantId = (req.headers["x-tenant-id"] || "").toString().trim();
   const message = (req.body?.message || "").toString();
   let userPlan = (req.headers["x-plan"] || "rule").toString();
-  const customApiKey = (req.headers["x-api-key"] || "").toString().trim(); // enterprise BYOK
-  const overrideLimit = req.headers["x-ai-limit"]; // optional per-tenant limit
+  const customApiKey = (req.headers["x-api-key"] || "").toString().trim();
+  const overrideLimit = req.headers["x-ai-limit"];
 
-  // Validate plan
   if (!PLANS[userPlan]) userPlan = "rule";
 
-  // Ensure usage record & attach plan
   const usage = ensureMonth(userId);
   usage.plan = userPlan;
-
-  // Persist plan immediately (even for rule mode)
   const allUsage = loadUsage();
   allUsage[userId] = usage;
   saveUsage(allUsage);
@@ -765,7 +741,6 @@ app.post("/chat", async (req, res) => {
     if (PLANS[userPlan].mode === "rule") {
       reply = findFAQReply(message) || "⚠️ Sorry, I only handle FAQs in this plan.";
     } else {
-      // AI mode — enforce caps
       const limit = clampLimit(userPlan, overrideLimit);
       if (usage.aiCalls >= limit) {
         reply = "⚠️ AI usage limit reached for this month. Please contact support to upgrade your plan.";
@@ -774,12 +749,11 @@ app.post("/chat", async (req, res) => {
         if (!apiKeyToUse) {
           reply = "⚠️ No API key configured. Please contact support.";
         } else {
-          // ==== Friendly, sales-oriented but strictly grounded assistant ====
           let contextBlocks = [];
           let productBlocks = [];
           if (tenantId) {
             contextBlocks = await retrieveContext(tenantId, message, 8);
-            const producty = /\b(product|buy|price|sizes?|colors?|catalog|shop|add to cart|order|stock|available|recommend|gift|present|necklace|earrings?|ring|bracelet)\b/i.test(message);
+            const producty = /\b(product|buy|price|sizes?|colors?|catalog|shop|add to cart|order|stock|available|recommend)\b/i.test(message);
             if (producty) {
               productBlocks = await retrieveProducts(tenantId, message, 6);
             }
@@ -787,24 +761,18 @@ app.post("/chat", async (req, res) => {
 
           const contextText = contextBlocks.map((b, i) => `#${i+1} [${b.url}]\n${b.text}`).join("\n\n");
           const productText = productBlocks.length
-            ? "Products:\n" + productBlocks.map((p, i) => `• ${p.name} — ${p.price ? p.price + (p.currency ? " " + p.currency : "") : ""}\n  Link: ${p.url}\n  ${p.description || ""}`).join("\n")
+            ? "Products:\n" + productBlocks.map((p) =>
+                `• ${p.name}${p.price ? " — " + p.price + (p.currency ? " " + p.currency : "") : ""}\n  Link: ${p.url}\n  ${p.description || ""}`
+              ).join("\n")
             : "";
 
-          const strictInstruction = `You are a friendly, concise shopping assistant for an e-commerce website.
+          const strictInstruction = `You are a helpful website assistant for the client's e-commerce site.
+You MUST answer ONLY using the information in "Context" and optionally "Products".
+If the answer is not present in Context, reply exactly with: "I’m not sure based on the site content. Please contact support or check the website."
+Never invent facts. Prefer short, direct answers. Include links only if they are present in Context or Products.
 
-GROUNDING RULES (must follow):
-- Only state facts that appear in "Context" and/or "Products". Do not invent details.
-- If the user asks about something not covered, answer exactly: "I’m not sure based on the site content. Please contact support or check the website."
-
-TONE & STYLE:
-- Warm, helpful, and sales-oriented, but not pushy.
-- Prefer short paragraphs or bullets; keep answers scannable.
-- When the user greets you or asks broadly, briefly ask what they’re shopping for (category, style, budget).
-
-PRODUCT BEHAVIOR:
-- If Products are provided and relevant, you may reference them (name, short detail) based ONLY on provided info.
-- Include links only if present in Products/Context.
-- Be clear when info is missing (e.g., "I don’t see sizing info in the content provided.").`;
+When you mention a product, format it as: [Product Name](ProductURL) — PRICE CUR.
+Be welcoming with greetings and, if user intent is unclear, briefly ask what they’re shopping for (category, budget, style).`;
 
           const messages = [
             { role: "system", content: strictInstruction },
@@ -814,17 +782,6 @@ PRODUCT BEHAVIOR:
           reply = await callGPT(messages, apiKeyToUse);
           usedAI = true;
 
-          // NEW: Friendly product shortlist with clickable names (markdown) if we matched items
-          if (productBlocks && productBlocks.length) {
-            const picks = productBlocks.slice(0, 3);
-            const list = picks.map(p => {
-              const price = p.price ? `${p.price}${p.currency ? " " + p.currency : ""}` : "";
-              return `• [${p.name || "View product"}](${p.url})${price ? " — " + price : ""}`;
-            }).join("\n");
-            reply += `\n\nYou may like:\n${list}\n\nCan I narrow it down for you by style, size, or budget?`;
-          }
-
-          // Soft fallback to FAQs if no context and strict reply
           if ((!reply || /I’m not sure based on the site content/i.test(reply)) && !contextBlocks.length) {
             const faq = findFAQReply(message);
             if (faq) reply = faq;
@@ -837,7 +794,6 @@ PRODUCT BEHAVIOR:
     reply = findFAQReply(message) || "⚠️ Sorry, I could not generate a response.";
   }
 
-  // Increment and persist usage if AI was used
   let limit = clampLimit(userPlan, overrideLimit);
   if (usedAI) {
     usage.aiCalls++;
@@ -846,11 +802,9 @@ PRODUCT BEHAVIOR:
     saveUsage(all);
   }
 
-  // Save memory
   userMemory[userId].push({ role: "user", text: message, ts: new Date().toISOString() });
   userMemory[userId].push({ role: "assistant", text: reply, ts: new Date().toISOString() });
 
-  // Log analytics (now includes limit)
   logs.push({
     timestamp: new Date().toISOString(),
     userId,
@@ -864,7 +818,7 @@ PRODUCT BEHAVIOR:
   res.json({ reply, usage: usage.aiCalls, limit, plan: userPlan });
 });
 
-// DELETE /chat/clear — clear memory for a user (and optionally reset usage for the month)
+// DELETE /chat/clear
 app.delete("/chat/clear", (req, res) => {
   const userId = (req.headers["x-user-id"] || "").toString();
   if (!userId) return res.status(400).json({ error: "Missing x-user-id header" });
@@ -890,7 +844,7 @@ app.get("/usage/:userId", (req, res) => {
 // GET /analytics
 app.get("/analytics", (_req, res) => res.json(logs));
 
-// (optional) GET /faqs — debug/view current FAQs
+// (optional) GET /faqs
 app.get("/faqs", (_req, res) => {
   res.json(
     FAQs.map((f) => ({ trigger: f.trigger.toString(), reply: f.reply }))
@@ -898,8 +852,8 @@ app.get("/faqs", (_req, res) => {
 });
 
 // Healthcheck
-app.get("/", (_req, res) => res.json({ status: "ok", version: "2.9.2" }));
+app.get("/", (_req, res) => res.json({ status: "ok", version: "2.9.4" }));
 
 // Start server
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Chatbot backend v2.9.2 running on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Chatbot backend v2.9.4 running on port ${PORT}`));

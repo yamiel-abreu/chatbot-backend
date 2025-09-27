@@ -1,12 +1,10 @@
 <?php
 /**
  * Plugin Name: Chatbot Widget + Analytics + Site Indexing
- * Description: Floating chatbot widget grounded on your website via RAG, with admin analytics, settings, site indexing, product feed upload, and WooCommerce exporter.
- * Version: 2.9.3
+ * Description: Floating chatbot widget grounded on your website via RAG, with admin analytics, settings, site indexing, Woo sync, and product feed upload.
+ * Version: 2.9.4
  * Author: YAA
  */
-
-if (!defined('ABSPATH')) exit;
 
 // -----------------------
 // Helpers & Defaults
@@ -26,6 +24,11 @@ register_activation_hook(__FILE__, function () {
   // theming defaults
   add_option('chatbot_bot_name', 'Chatbot');
   add_option('chatbot_color', '#0073aa');
+  // Woo to Chatbot defaults
+  add_option('chatbot_woo_include_categories', '');
+  add_option('chatbot_woo_only_visible', '1');
+  add_option('chatbot_woo_only_instock', '1');
+  add_option('chatbot_woo_force_full_upload', '0'); // force re-embed all
 });
 
 // -----------------------
@@ -64,10 +67,14 @@ function chatbot_widget_inject() {
       }
 
       #chatbot-container {
-        position: fixed; bottom: 90px; right: 20px; width: 340px; height: 460px; background: #fff;
+        position: fixed; right: 20px; width: 360px; max-width: calc(100vw - 40px);
+        bottom: 90px; background: #fff;
         border: 1px solid #dcdcdc; border-radius: 14px; display: none; flex-direction: column;
         font-family: system-ui, Arial, sans-serif; z-index: 10001; box-shadow: 0 8px 24px rgba(0,0,0,.12);
         overflow: hidden;
+        /* Responsive height: 70% of viewport up to 640px; min 360px */
+        height: min(70vh, 640px);
+        min-height: 360px;
       }
       #chatbot-container[aria-hidden="true"] { display: none !important; }
 
@@ -98,6 +105,10 @@ function chatbot_widget_inject() {
       .bubble { display:inline-block; max-width:85%; padding:8px 10px; border-radius:12px; white-space: pre-wrap; word-break: break-word; }
       .bubble-user { background:#1f2937; color:#fff; }
       .bubble-bot { background:#e5e7eb; color:#111; }
+
+      /* Links inside bubbles */
+      .bubble a { text-decoration: underline; color: var(--chat-accent); }
+      .bubble a:focus, .bubble a:hover { outline: none; }
 
       /* Tiny inline SVG in launcher controlled by JS (paths) */
       .svg-ico { width:24px; height:24px; display:block; }
@@ -197,6 +208,7 @@ function chatbot_widget_inject() {
       const clearBtn = document.getElementById("chatbot-clear");
       const usageFill = document.getElementById("chatbot-usage-fill");
       const hint = document.getElementById("tiny-hint");
+      const titleEl = document.getElementById("chatbot-title");
 
       // icons
       const PATH_OPEN = "M4 4h16v12H7l-3 3V4z"; // bubble = means "open chat"
@@ -210,12 +222,47 @@ function chatbot_widget_inject() {
         if (openState) launcher.removeAttribute("data-unread");
       }
 
+      // --- SAFE renderer: Markdown links + auto-link bare URLs, XSS-escaped
+      function renderMessageHTML(raw) {
+        const esc = (s) => s
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;")
+          .replace(/'/g, "&#39;");
+
+        let out = "";
+        let last = 0;
+        const md = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/gi;
+        let m;
+        while ((m = md.exec(raw))) {
+          out += esc(raw.slice(last, m.index));
+          const text = esc(m[1]);
+          const url = m[2];
+          if (/^https?:\/\//i.test(url)) {
+            const safeUrl = url.replace(/"/g, "%22");
+            out += `<a href="${safeUrl}" target="_blank" rel="noopener nofollow">${text}</a>`;
+          } else {
+            out += text;
+          }
+          last = md.lastIndex;
+        }
+        out += esc(raw.slice(last));
+
+        out = out.replace(/(https?:\/\/[^\s<>{}]+)/gi, (u) => {
+          const safeUrl = u.replace(/"/g, "%22");
+          return `<a href="${safeUrl}" target="_blank" rel="noopener nofollow">${u}</a>`;
+        });
+
+        return out.replace(/\n/g, "<br>");
+      }
+
       function bubble(sender, text){
           const wrap = document.createElement("div");
           wrap.className = "bubble-wrap";
           const msg = document.createElement("div");
-          msg.textContent = text;
           msg.className = "bubble " + (sender === "You" ? "bubble-user" : "bubble-bot");
+          msg.innerHTML = renderMessageHTML(String(text || ""));
           if (sender === "You") wrap.style.textAlign = "right";
           wrap.appendChild(msg);
           messagesDiv.appendChild(wrap);
@@ -247,14 +294,14 @@ function chatbot_widget_inject() {
       function showWidget() {
         container.style.display = "flex";
         container.setAttribute("aria-hidden", "false");
-        setLauncherIcon(true); // launcher stays visible, shows "minimize" icon
+        setLauncherIcon(true);
         setWidgetState("max");
         setTimeout(() => input?.focus(), 50);
       }
       function hideWidget() {
         container.style.display = "none";
         container.setAttribute("aria-hidden", "true");
-        setLauncherIcon(false); // launcher shows "open" icon
+        setLauncherIcon(false);
         setWidgetState("min");
       }
 
@@ -266,6 +313,8 @@ function chatbot_widget_inject() {
       // Initialize min/max based on saved state (default: minimized)
       if (getWidgetState() === "max") { showWidget(); } else { hideWidget(); }
 
+      // Toggle from header double-click
+      header.addEventListener("dblclick", toggleWidget);
       // explicit minimize button
       minimizeBtn?.addEventListener("click", (e) => { e.stopPropagation(); hideWidget(); });
       // launcher: click or keyboard
@@ -293,7 +342,6 @@ function chatbot_widget_inject() {
               typing(false);
 
               const replyText = String(data.reply ?? "");
-              // If minimized (rare while sending), badge it
               if (container.getAttribute("aria-hidden") === "true") {
                 const current = Number(launcher.getAttribute("data-unread") || 0) + 1;
                 launcher.setAttribute("data-unread", String(current));
@@ -341,15 +389,13 @@ function chatbot_widget_inject() {
 add_action("wp_footer", "chatbot_widget_inject");
 
 // ------------------------------
-// ADMIN: MENU (Analytics + Settings/Indexing)
+// ADMIN: MENU (Analytics + Settings/Indexing + Woo sync)
 // ------------------------------
 add_action('admin_menu', function() {
-  // Top-level (Analytics as default)
   add_menu_page('Chatbot Analytics', 'Chatbot', 'manage_options', 'chatbot-analytics', 'chatbot_analytics_page', 'dashicons-format-chat', 26);
-  // Submenu: Analytics
   add_submenu_page('chatbot-analytics', 'Chatbot Analytics', 'Analytics', 'manage_options', 'chatbot-analytics', 'chatbot_analytics_page');
-  // Submenu: Settings & Index
   add_submenu_page('chatbot-analytics', 'Chatbot Settings & Indexing', 'Settings & Indexing', 'manage_options', 'chatbot-settings', 'chatbot_settings_page');
+  add_submenu_page('chatbot-analytics', 'WooCommerce → Chatbot Products', 'Woo → Chatbot', 'manage_options', 'chatbot-woo', 'chatbot_woo_page');
 });
 
 // ------------------------------
@@ -361,9 +407,17 @@ add_action('admin_init', function () {
   register_setting('chatbot_settings', 'chatbot_base_url',   ['type'=>'string','sanitize_callback'=>'esc_url_raw']);
   register_setting('chatbot_settings', 'chatbot_max_pages',  ['type'=>'string','sanitize_callback'=>'sanitize_text_field']);
   register_setting('chatbot_settings', 'chatbot_plan',       ['type'=>'string','sanitize_callback'=>'sanitize_text_field']);
-  // per-site theming
+  // theming
   register_setting('chatbot_settings', 'chatbot_bot_name',   ['type'=>'string','sanitize_callback'=>'sanitize_text_field']);
   register_setting('chatbot_settings', 'chatbot_color',      ['type'=>'string','sanitize_callback'=>'sanitize_hex_color']);
+
+  // Woo sync settings
+  register_setting('chatbot_woo_settings', 'chatbot_backend_url', ['type'=>'string','sanitize_callback'=>'esc_url_raw']);
+  register_setting('chatbot_woo_settings', 'chatbot_tenant_id',   ['type'=>'string','sanitize_callback'=>'sanitize_text_field']);
+  register_setting('chatbot_woo_settings', 'chatbot_woo_include_categories', ['type'=>'string','sanitize_callback'=>'sanitize_text_field']);
+  register_setting('chatbot_woo_settings', 'chatbot_woo_only_visible', ['type'=>'string','sanitize_callback'=>'sanitize_text_field']);
+  register_setting('chatbot_woo_settings', 'chatbot_woo_only_instock', ['type'=>'string','sanitize_callback'=>'sanitize_text_field']);
+  register_setting('chatbot_woo_settings', 'chatbot_woo_force_full_upload', ['type'=>'string','sanitize_callback'=>'sanitize_text_field']);
 });
 
 // ------------------------------
@@ -425,7 +479,6 @@ function chatbot_analytics_page() {
             if (!res.ok) throw new Error(res.status);
             const logs = await res.json();
 
-            // ---- Fill raw logs table
             const tbody = document.querySelector('#chatbot-analytics-table tbody');
             tbody.innerHTML = '';
             logs.slice(-1000).forEach(log => {
@@ -438,7 +491,6 @@ function chatbot_analytics_page() {
                 tbody.appendChild(tr);
             });
 
-            // ---- Build usage summary per user (latest aiCalls + plan + last seen + limit)
             const perUser = {};
             for (const l of logs) {
               const u = l.userId || 'unknown';
@@ -472,7 +524,6 @@ function chatbot_analytics_page() {
                 usageBody.appendChild(tr);
             });
 
-            // ---- Status card totals
             const totals = entries.reduce((acc, [,i]) => {
               acc.users += 1;
               acc.calls += (Number(i.aiCalls)||0);
@@ -502,7 +553,7 @@ function chatbot_analytics_page() {
 }
 
 // ------------------------------
-// ADMIN: SETTINGS & INDEX PAGE + WOO EXPORT
+// ADMIN: SETTINGS & INDEX PAGE
 // ------------------------------
 function chatbot_settings_page() {
   $backend = nubedy_chatbot_get_option('chatbot_backend_url', 'https://chatbot-backend-9lxr.onrender.com');
@@ -520,7 +571,6 @@ function chatbot_settings_page() {
   $maxpg_esc   = esc_attr($maxpg);
   $botname_esc = esc_attr($botname);
   $color_esc   = esc_attr($color);
-  $nonce       = wp_create_nonce('wp_rest');
   ?>
   <div class="wrap">
     <h1>Chatbot Settings & Site Indexing</h1>
@@ -598,45 +648,6 @@ function chatbot_settings_page() {
       <button class="button" id="btn-list-products">List Products</button>
     </div>
     <pre id="feed-output" style="white-space:pre-wrap;background:#fff;border:1px solid #e2e2e2;border-radius:6px;padding:10px;max-height:260px;overflow:auto;">Waiting for input…</pre>
-
-    <hr>
-
-    <h2>WooCommerce ➜ Chatbot Products</h2>
-    <p>Export Woo products directly to the backend embeddings index.</p>
-    <table class="form-table" role="presentation">
-      <tr>
-        <th scope="row">Category slugs</th>
-        <td>
-          <input id="woo_cat_slugs" type="text" class="regular-text" placeholder="rings,necklaces">
-          <p class="description">Optional. Comma-separated category <em>slugs</em>. Leave empty for all categories.</p>
-        </td>
-      </tr>
-      <tr>
-        <th scope="row">Filters</th>
-        <td>
-          <label><input type="checkbox" id="woo_only_visible" checked> Only visible (exclude hidden)</label><br>
-          <label><input type="checkbox" id="woo_only_instock" checked> Only in stock</label>
-        </td>
-      </tr>
-      <tr>
-        <th scope="row">Preview size</th>
-        <td>
-          <input id="woo_preview_limit" type="number" class="small-text" value="10" min="1" max="100">
-          <span class="description">First N products to preview (no upload)</span>
-        </td>
-      </tr>
-    </table>
-    <div style="display:flex;gap:8px;margin:10px 0;">
-      <button class="button" id="btn-woo-preview">Preview (first N)</button>
-      <button class="button button-primary" id="btn-woo-sync">Sync Woo ➜ Backend</button>
-      <button class="button" id="btn-woo-force">Force full upload</button>
-    </div>
-    <p style="max-width:800px;">
-      <strong>Force full upload</strong> pushes <em>all</em> matching products to the backend, <u>ignoring the change hashes</u> we store per product.  
-      Use it after bulk edits, taxonomy changes, or when you want to re-embed everything (heavier + may increase token usage).
-    </p>
-    <pre id="woo-output" style="white-space:pre-wrap;background:#fff;border:1px solid #e2e2e2;border-radius:6px;padding:10px;max-height:360px;overflow:auto;">Ready.</pre>
-
   </div>
 
   <script>
@@ -645,14 +656,13 @@ function chatbot_settings_page() {
       return {
         backend: document.getElementById('chatbot_backend_url').value.trim(),
         tenant:  document.getElementById('chatbot_tenant_id').value.trim(),
-        baseUrl: document.getElementById('chatbot_base_url') ? document.getElementById('chatbot_base_url').value.trim() : '',
-        maxPages: Number(document.getElementById('chatbot_max_pages') ? document.getElementById('chatbot_max_pages').value : 120)
+        baseUrl: document.getElementById('chatbot_base_url').value.trim(),
+        maxPages: Number(document.getElementById('chatbot_max_pages').value || 120)
       };
     }
 
     const out = document.getElementById('index-output');
     const feedOut = document.getElementById('feed-output');
-    const wooOut = document.getElementById('woo-output');
 
     async function doIndex(){
       const { backend, tenant, baseUrl, maxPages } = getVals();
@@ -708,7 +718,6 @@ function chatbot_settings_page() {
         if (type === 'csv') {
           payload.csv = txt;
         } else {
-          // Allow raw array or {items:[...]}
           let parsed = JSON.parse(txt);
           if (Array.isArray(parsed)) payload.items = parsed;
           else if (parsed && Array.isArray(parsed.items)) payload.items = parsed.items;
@@ -742,295 +751,309 @@ function chatbot_settings_page() {
       }
     }
 
-    // ---- Woo UI helpers
-    function wooVals() {
-      return {
-        slugs: (document.getElementById('woo_cat_slugs').value || '').trim(),
-        onlyVisible: !!document.getElementById('woo_only_visible').checked,
-        onlyStock: !!document.getElementById('woo_only_instock').checked,
-        limit: Math.max(1, Math.min(100, parseInt(document.getElementById('woo_preview_limit').value || '10', 10))),
-        nonce: '<?php echo esc_js($nonce); ?>'
-      };
-    }
-
-    async function wooPreview(){
-      wooOut.textContent = 'Loading preview…';
-      try {
-        const v = wooVals();
-        const qs = new URLSearchParams({
-          slugs: v.slugs,
-          only_visible: v.onlyVisible ? '1' : '0',
-          only_instock: v.onlyStock ? '1' : '0',
-          limit: String(v.limit),
-          _wpnonce: v.nonce
-        });
-        const res = await fetch('<?php echo esc_url( rest_url('chatbot/v1/products') ); ?>' + '?' + qs.toString(), {
-          method: 'GET',
-          credentials: 'same-origin',
-          headers: { 'Accept': 'application/json' }
-        });
-        const j = await res.json();
-        wooOut.textContent = JSON.stringify(j, null, 2);
-      } catch (e) {
-        wooOut.textContent = 'Error: ' + (e && e.message ? e.message : String(e));
-      }
-    }
-
-    async function wooSync(forceAll){
-      wooOut.textContent = forceAll ? 'Forcing full upload…' : 'Syncing (incremental)…';
-      try {
-        const v = wooVals();
-        const { backend, tenant } = getVals();
-        if (!backend || !tenant) {
-          wooOut.textContent = 'Please fill Backend URL and Tenant ID, then Save Settings.';
-          return;
-        }
-        const res = await fetch('<?php echo esc_url( rest_url('chatbot/v1/sync') ); ?>', {
-          method: 'POST',
-          credentials: 'same-origin',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-WP-Nonce': v.nonce
-          },
-          body: JSON.stringify({
-            slugs: v.slugs,
-            only_visible: v.onlyVisible ? 1 : 0,
-            only_instock: v.onlyStock ? 1 : 0,
-            force: forceAll ? 1 : 0,
-            backend,
-            tenant
-          })
-        });
-        const j = await res.json();
-        wooOut.textContent = JSON.stringify(j, null, 2);
-      } catch (e) {
-        wooOut.textContent = 'Error: ' + (e && e.message ? e.message : String(e));
-      }
-    }
-
     document.getElementById('btn-index-site').addEventListener('click', (e)=>{ e.preventDefault(); doIndex(); });
     document.getElementById('btn-status-site').addEventListener('click', (e)=>{ e.preventDefault(); doStatus(); });
     document.getElementById('btn-upload-feed').addEventListener('click', (e)=>{ e.preventDefault(); uploadFeed(); });
     document.getElementById('btn-list-products').addEventListener('click', (e)=>{ e.preventDefault(); listProducts(); });
-
-    document.getElementById('btn-woo-preview').addEventListener('click', (e)=>{ e.preventDefault(); wooPreview(); });
-    document.getElementById('btn-woo-sync').addEventListener('click', (e)=>{ e.preventDefault(); wooSync(false); });
-    document.getElementById('btn-woo-force').addEventListener('click', (e)=>{ e.preventDefault(); wooSync(true); });
   })();
   </script>
   <?php
 }
 
 // ------------------------------
-// REST: Woo ➜ Chatbot Exporter
+// WOO → CHATBOT SYNC PAGE (includes force full upload option)
 // ------------------------------
-add_action('rest_api_init', function () {
+function chatbot_woo_page() {
+  if ( ! function_exists('wc_get_products') ) {
+    echo '<div class="wrap"><h1>Woo → Chatbot</h1><p>WooCommerce is not active.</p></div>';
+    return;
+  }
+  $backend = nubedy_chatbot_get_option('chatbot_backend_url', '');
+  $tenant  = nubedy_chatbot_get_option('chatbot_tenant_id', '');
+  $backend_esc = esc_attr($backend);
+  $tenant_esc  = esc_attr($tenant);
 
-  register_rest_route('chatbot/v1', '/products', [
-    'methods'  => 'GET',
-    'permission_callback' => function() { return current_user_can('manage_options'); },
-    'callback' => function(WP_REST_Request $req) {
-      if (!class_exists('WooCommerce')) return new WP_REST_Response(['ok'=>false,'error'=>'WooCommerce not active'], 400);
+  $include_categories = esc_attr(nubedy_chatbot_get_option('chatbot_woo_include_categories', ''));
+  $only_visible = esc_attr(nubedy_chatbot_get_option('chatbot_woo_only_visible', '1'));
+  $only_instock = esc_attr(nubedy_chatbot_get_option('chatbot_woo_only_instock', '1'));
+  $force_full   = esc_attr(nubedy_chatbot_get_option('chatbot_woo_force_full_upload', '0'));
+  ?>
+  <div class="wrap">
+    <h1>WooCommerce → Chatbot Products</h1>
+    <p>Export selected WooCommerce products into the chatbot’s product index.</p>
 
-      $slugs = array_filter(array_map('trim', explode(',', (string)$req->get_param('slugs'))));
-      $onlyVisible = (int)$req->get_param('only_visible') === 1 || $req->get_param('only_visible') === '1';
-      $onlyStock   = (int)$req->get_param('only_instock') === 1 || $req->get_param('only_instock') === '1';
-      $limit       = max(1, min(100, intval($req->get_param('limit') ?: 10)));
+    <form method="post" action="options.php" style="margin:14px 0;">
+      <?php settings_fields('chatbot_woo_settings'); ?>
+      <table class="form-table" role="presentation">
+        <tr>
+          <th scope="row">Backend URL</th>
+          <td><input name="chatbot_backend_url" type="url" class="regular-text" value="<?php echo $backend_esc; ?>" placeholder="https://your-backend.onrender.com"></td>
+        </tr>
+        <tr>
+          <th scope="row">Tenant ID</th>
+          <td><input name="chatbot_tenant_id" type="text" class="regular-text" value="<?php echo $tenant_esc; ?>" placeholder="client-123"></td>
+        </tr>
+        <tr>
+          <th scope="row">Include Categories (slugs, comma-separated)</th>
+          <td><input name="chatbot_woo_include_categories" type="text" class="regular-text" value="<?php echo $include_categories; ?>" placeholder="rings,necklaces"></td>
+        </tr>
+        <tr>
+          <th scope="row">Only visible in catalog/search</th>
+          <td><label><input name="chatbot_woo_only_visible" type="checkbox" value="1" <?php checked($only_visible, '1'); ?>> Exclude hidden products</label></td>
+        </tr>
+        <tr>
+          <th scope="row">Only in stock</th>
+          <td><label><input name="chatbot_woo_only_instock" type="checkbox" value="1" <?php checked($only_instock, '1'); ?>> Exclude out-of-stock</label></td>
+        </tr>
+        <tr>
+          <th scope="row">Force full upload</th>
+          <td>
+            <label><input name="chatbot_woo_force_full_upload" type="checkbox" value="1" <?php checked($force_full, '1'); ?>>
+              Recreate the whole product index (re-embeds everything). <em>Use this if many products changed or you suspect stale embeddings.</em>
+            </label>
+          </td>
+        </tr>
+      </table>
+      <?php submit_button('Save Woo Settings'); ?>
+    </form>
 
-      $args = [
-        'status'   => 'publish',
-        'paginate' => true,
-        'return'   => 'ids',
-        'limit'    => 100, // page size
-      ];
-      if (!empty($slugs)) $args['category'] = $slugs;
+    <div style="display:flex;gap:8px;margin:10px 0;">
+      <button class="button button-primary" id="btn-woo-preview">Preview Selection</button>
+      <button class="button" id="btn-woo-upload">Upload to Chatbot</button>
+    </div>
+    <pre id="woo-output" style="white-space:pre-wrap;background:#fff;border:1px solid #e2e2e2;border-radius:6px;padding:10px;max-height:420px;overflow:auto;">Ready.</pre>
 
-      $paged = 1;
-      $items = [];
+    <hr>
+    <h2>Schedule Nightly Sync</h2>
+    <p>Runs a WP-Cron job nightly to sync new/updated products into the chatbot index.</p>
+    <div style="display:flex;gap:8px;margin:10px 0;">
+      <button class="button" id="btn-woo-schedule">Schedule Nightly</button>
+      <button class="button" id="btn-woo-run-now">Run Sync Now</button>
+      <button class="button" id="btn-woo-unschedule">Unschedule</button>
+    </div>
+    <pre id="woo-cron-output" style="white-space:pre-wrap;background:#fff;border:1px solid #e2e2e2;border-radius:6px;padding:10px;max-height:240px;overflow:auto;">Ready.</pre>
+  </div>
 
-      do {
-        $args['page'] = $paged;
-        $result = wc_get_products($args); // ARRAY: ['products'=>[], 'total'=>int, 'max_num_pages'=>int]
-        $ids = (is_array($result) && isset($result['products'])) ? $result['products'] : [];
+  <script>
+  (function(){
+    const out = document.getElementById('woo-output');
+    const outCron = document.getElementById('woo-cron-output');
 
-        foreach ($ids as $pid) {
-          $item = chatbot_build_item_from_product($pid, $onlyVisible, $onlyStock);
-          if ($item) $items[] = $item;
-          if (count($items) >= $limit) break 2;
-        }
-
-        $max_pages = (is_array($result) && isset($result['max_num_pages'])) ? intval($result['max_num_pages']) : 0;
-        $paged++;
-      } while ($max_pages && $paged <= $max_pages);
-
-      return new WP_REST_Response(['ok'=>true, 'count'=>count($items), 'items'=>$items], 200);
+    async function wooAjax(action){
+      const res = await fetch(ajaxurl, {
+        method: 'POST',
+        headers: {'Content-Type':'application/x-www-form-urlencoded'},
+        body: new URLSearchParams({ action })
+      });
+      return res.json();
     }
-  ]);
 
-  register_rest_route('chatbot/v1', '/sync', [
-    'methods'  => 'POST',
-    'permission_callback' => function() { return current_user_can('manage_options'); },
-    'callback' => function(WP_REST_Request $req) {
-      if (!class_exists('WooCommerce')) return new WP_REST_Response(['ok'=>false,'error'=>'WooCommerce not active'], 400);
-
-      $slugs = array_filter(array_map('trim', explode(',', (string)$req->get_param('slugs'))));
-      $onlyVisible = (int)$req->get_param('only_visible') === 1 || $req->get_param('only_visible') === '1';
-      $onlyStock   = (int)$req->get_param('only_instock') === 1 || $req->get_param('only_instock') === '1';
-      $force       = (int)$req->get_param('force') === 1 || $req->get_param('force') === '1';
-
-      $backend = rtrim((string)$req->get_param('backend'), '/');
-      $tenant  = (string)$req->get_param('tenant');
-
-      if (!$backend || !$tenant) {
-        return new WP_REST_Response(['ok'=>false, 'error'=>'Missing backend or tenant'], 400);
+    document.getElementById('btn-woo-preview').addEventListener('click', async (e)=>{
+      e.preventDefault();
+      out.textContent = 'Collecting…';
+      try {
+        const j = await wooAjax('chatbot_woo_preview');
+        out.textContent = JSON.stringify(j, null, 2);
+      } catch (err) {
+        out.textContent = 'Error: ' + (err && err.message ? err.message : String(err));
       }
+    });
 
-      $args = [
-        'status'   => 'publish',
-        'paginate' => true,
-        'return'   => 'ids',
-        'limit'    => 100,
-      ];
-      if (!empty($slugs)) $args['category'] = $slugs;
-
-      $paged = 1;
-      $uploaded = 0;
-      $considered = 0;
-
-      $batch = [];
-      $batchSize = 200;
-
-      do {
-        $args['page'] = $paged;
-        $result = wc_get_products($args); // ARRAY
-        $ids = (is_array($result) && isset($result['products'])) ? $result['products'] : [];
-
-        foreach ($ids as $pid) {
-          $item = chatbot_build_item_from_product($pid, $onlyVisible, $onlyStock);
-          if (!$item) continue;
-
-          $considered++;
-          $hash = chatbot_hash_item($item);
-
-          if (!$force) {
-            $prev = get_post_meta($pid, '_chatbot_sync_hash', true);
-            if ($hash === $prev) continue; // unchanged -> skip
-          }
-
-          $item['_product_id'] = $pid;
-          $item['_hash'] = $hash;
-          $batch[] = $item;
-
-          if (count($batch) >= $batchSize) {
-            $ok = chatbot_upload_items($backend, $tenant, $batch);
-            if ($ok) {
-              foreach ($batch as $it) update_post_meta($it['_product_id'], '_chatbot_sync_hash', $it['_hash']);
-              $uploaded += count($batch);
-            }
-            $batch = [];
-            sleep(1);
-          }
-        }
-
-        $max_pages = (is_array($result) && isset($result['max_num_pages'])) ? intval($result['max_num_pages']) : 0;
-        $paged++;
-      } while ($max_pages && $paged <= $max_pages);
-
-      if (!empty($batch)) {
-        $ok = chatbot_upload_items($backend, $tenant, $batch);
-        if ($ok) {
-          foreach ($batch as $it) update_post_meta($it['_product_id'], '_chatbot_sync_hash', $it['_hash']);
-          $uploaded += count($batch);
-        }
+    document.getElementById('btn-woo-upload').addEventListener('click', async (e)=>{
+      e.preventDefault();
+      out.textContent = 'Uploading…';
+      try {
+        const j = await wooAjax('chatbot_woo_upload');
+        out.textContent = JSON.stringify(j, null, 2);
+      } catch (err) {
+        out.textContent = 'Error: ' + (err && err.message ? err.message : String(err));
       }
+    });
 
-      return new WP_REST_Response([
-        'ok' => true,
-        'considered' => $considered,
-        'uploaded' => $uploaded,
-        'force' => $force ? 1 : 0
-      ], 200);
+    document.getElementById('btn-woo-schedule').addEventListener('click', async (e)=>{
+      e.preventDefault(); outCron.textContent = 'Scheduling…';
+      try {
+        const j = await wooAjax('chatbot_woo_schedule_cron');
+        outCron.textContent = JSON.stringify(j, null, 2);
+      } catch (err) { outCron.textContent = 'Error: ' + String(err); }
+    });
+
+    document.getElementById('btn-woo-run-now').addEventListener('click', async (e)=>{
+      e.preventDefault(); outCron.textContent = 'Running now…';
+      try {
+        const j = await wooAjax('chatbot_woo_run_now');
+        outCron.textContent = JSON.stringify(j, null, 2);
+      } catch (err) { outCron.textContent = 'Error: ' + String(err); }
+    });
+
+    document.getElementById('btn-woo-unschedule').addEventListener('click', async (e)=>{
+      e.preventDefault(); outCron.textContent = 'Unscheduling…';
+      try {
+        const j = await wooAjax('chatbot_woo_unschedule_cron');
+        outCron.textContent = JSON.stringify(j, null, 2);
+      } catch (err) { outCron.textContent = 'Error: ' + String(err); }
+    });
+
+  })();
+  </script>
+  <?php
+}
+
+// ------------------------------
+// WOO AJAX + CRON (server-side handlers)
+// ------------------------------
+add_action('wp_ajax_chatbot_woo_preview', 'chatbot_woo_preview');
+add_action('wp_ajax_chatbot_woo_upload',  'chatbot_woo_upload');
+
+function chatbot_collect_products($limit = 100, $page = 1, $for_preview = true) {
+  if (!function_exists('wc_get_products')) return ['items'=>[], 'diagnostics'=>['error'=>'woocommerce missing']];
+
+  $include_cats = array_filter(array_map('trim', explode(',', nubedy_chatbot_get_option('chatbot_woo_include_categories', ''))));
+  $only_visible = nubedy_chatbot_get_option('chatbot_woo_only_visible', '1') === '1';
+  $only_instock = nubedy_chatbot_get_option('chatbot_woo_only_instock', '1') === '1';
+
+  $args = [
+    'status'   => 'publish',
+    'paginate' => true,
+    'limit'    => $limit,
+    'page'     => $page,
+  ];
+  if ($only_visible) {
+    $args['catalog_visibility'] = ['visible', 'catalog', 'search'];
+  }
+  if ($only_instock) {
+    $args['stock_status'] = ['instock'];
+  }
+  if (!empty($include_cats)) {
+    $args['category'] = $include_cats;
+  }
+
+  $q = wc_get_products($args);
+  $items = [];
+  foreach ($q->products as $p) {
+    if (!($p instanceof WC_Product)) continue;
+    $permalink = get_permalink($p->get_id());
+    $img = wp_get_attachment_image_src($p->get_image_id(), 'full');
+    $brand = '';
+    // try common brand taxonomies/meta
+    $brand_tax = 'product_brand';
+    $terms = get_the_terms($p->get_id(), $brand_tax);
+    if ($terms && !is_wp_error($terms)) {
+      $brand = $terms[0]->name;
+    } else {
+      $brand = get_post_meta($p->get_id(), 'brand', true);
     }
-  ]);
-
-});
-
-// ------------------------------
-// Woo helpers
-// ------------------------------
-function chatbot_build_item_from_product($pid, $onlyVisible, $onlyStock) {
-  $p = wc_get_product($pid);
-  if (!$p) return null;
-
-  // status & stock & visibility filters
-  if ('publish' !== get_post_status($pid)) return null;
-  if ($onlyStock && !$p->is_in_stock()) return null;
-
-  $vis = method_exists($p, 'get_catalog_visibility') ? $p->get_catalog_visibility() : 'visible';
-  if ($onlyVisible && $vis === 'hidden') return null;
-
-  // category check handled by wc_get_products when category arg is passed
-
-  $name = $p->get_name();
-  $short = $p->get_short_description();
-  $desc = $short ? $short : wp_strip_all_tags($p->get_description());
-  $desc = wp_trim_words($desc, 160, '…');
-
-  $url = get_permalink($pid);
-  $sku = $p->get_sku();
-  $price = $p->get_price(); // numeric string
-  $currency = get_woocommerce_currency();
-
-  // main image
-  $img_id = $p->get_image_id();
-  $image = $img_id ? wp_get_attachment_url($img_id) : '';
-
-  // brand (common taxonomies)
-  $brand = '';
-  $brand_terms = wp_get_post_terms($pid, ['product_brand', 'brand'], ['fields' => 'names']);
-  if (!is_wp_error($brand_terms) && !empty($brand_terms)) {
-    $brand = $brand_terms[0];
-  } else {
-    // attribute-based brand
-    $attr_brand = $p->get_attribute('pa_brand');
-    if (!empty($attr_brand)) $brand = is_array($attr_brand) ? reset($attr_brand) : $attr_brand;
+    $items[] = [
+      'name' => $p->get_name(),
+      'description' => wp_strip_all_tags($p->get_short_description() ?: $p->get_description()),
+      'url' => $permalink,
+      'price' => $p->get_price(),
+      'currency' => get_woocommerce_currency(),
+      'image' => $img ? $img[0] : '',
+      'sku' => $p->get_sku(),
+      'brand' => $brand,
+    ];
   }
 
   return [
-    'name' => $name,
-    'description' => $desc,
-    'url' => $url,
-    'price' => $price,
-    'currency' => $currency,
-    'image' => $image,
-    'sku' => $sku,
-    'brand' => $brand
+    'items' => $items,
+    'diagnostics' => [
+      'args_used' => $args,
+      'received'  => count($items),
+      'total'     => (int)$q->total,
+      'pages'     => (int)$q->max_num_pages,
+      'page'      => (int)$page
+    ]
   ];
 }
 
-function chatbot_hash_item($item) {
-  $key = implode('|', [
-    $item['sku'] ?? '',
-    $item['name'] ?? '',
-    $item['description'] ?? '',
-    $item['price'] ?? '',
-    $item['currency'] ?? '',
-    $item['url'] ?? '',
-    $item['image'] ?? '',
-    $item['brand'] ?? ''
-  ]);
-  return md5($key);
+function chatbot_woo_preview() {
+  if (!current_user_can('manage_options')) { wp_send_json_error(['message'=>'forbidden'], 401); }
+  $page = 1;
+  $all = [];
+  $diag = [];
+  do {
+    $batch = chatbot_collect_products(100, $page, true);
+    $all = array_merge($all, $batch['items']);
+    $diag = $batch['diagnostics'];
+    $page++;
+  } while ($diag['page'] < $diag['pages']);
+  wp_send_json(['ok'=>true, 'count'=>count($all), 'items'=>$all, 'diagnostics'=>$diag]);
 }
 
-function chatbot_upload_items($backend, $tenant, $items) {
-  $endpoint = rtrim($backend, '/') . '/products/upload';
-  $payload = wp_json_encode([ 'tenantId' => $tenant, 'items' => array_values($items) ]);
-  $res = wp_remote_post($endpoint, [
-    'timeout' => 60,
-    'headers' => [ 'Content-Type' => 'application/json' ],
-    'body'    => $payload
-  ]);
-  if (is_wp_error($res)) return false;
-  $code = wp_remote_retrieve_response_code($res);
-  return ($code >= 200 && $code < 300);
+function chatbot_woo_upload() {
+  if (!current_user_can('manage_options')) { wp_send_json_error(['message'=>'forbidden'], 401); }
+  $backend = rtrim(nubedy_chatbot_get_option('chatbot_backend_url', ''), '/');
+  $tenant  = nubedy_chatbot_get_option('chatbot_tenant_id', '');
+  if (!$backend || !$tenant) {
+    wp_send_json_error(['message'=>'Configure Backend URL and Tenant ID in Settings.'], 400);
+  }
+  $force_full = (nubedy_chatbot_get_option('chatbot_woo_force_full_upload', '0') === '1');
+
+  $page = 1;
+  $all = [];
+  $diag = [];
+  do {
+    $batch = chatbot_collect_products(100, $page, false);
+    $all = array_merge($all, $batch['items']);
+    $diag = $batch['diagnostics'];
+    $page++;
+  } while ($diag['page'] < $diag['pages']);
+
+  if ($force_full) {
+    // Replace entire index: send all items in one go
+    $payload = ['tenantId'=>$tenant, 'items'=>$all];
+    $res = wp_remote_post($backend . '/products/upload', [
+      'headers' => ['Content-Type'=>'application/json'],
+      'body'    => wp_json_encode($payload),
+      'timeout' => 60,
+    ]);
+    if (is_wp_error($res)) {
+      wp_send_json_error(['message'=>$res->get_error_message()]);
+    }
+    $body = wp_remote_retrieve_body($res);
+    $json = json_decode($body, true);
+    wp_send_json(['ok'=>true, 'uploaded'=>count($all), 'backend'=> $json, 'note'=>'Force full upload: replaced entire product index.']);
+  } else {
+    // Incremental: chunk by 200
+    $chunks = array_chunk($all, 200);
+    $uploaded = 0;
+    foreach ($chunks as $chunk) {
+      $payload = ['tenantId'=>$tenant, 'items'=>$chunk];
+      $res = wp_remote_post($backend . '/products/upload', [
+        'headers' => ['Content-Type'=>'application/json'],
+        'body'    => wp_json_encode($payload),
+        'timeout' => 60,
+      ]);
+      if (is_wp_error($res)) {
+        wp_send_json_error(['message'=>$res->get_error_message(), 'uploaded'=>$uploaded]);
+      }
+      $uploaded += count($chunk);
+    }
+    wp_send_json(['ok'=>true, 'uploaded'=>$uploaded, 'diagnostics'=>$diag, 'note'=>'Incremental upload (use "Force full upload" to rebuild index).']);
+  }
 }
+
+// -------- CRON: nightly sync new/updated products --------
+add_action('chatbot_woo_nightly_event', 'chatbot_woo_upload');
+
+add_action('wp_ajax_chatbot_woo_schedule_cron', function(){
+  if (!current_user_can('manage_options')) { wp_send_json_error(['message'=>'forbidden'], 401); }
+  if (!wp_next_scheduled('chatbot_woo_nightly_event')) {
+    wp_schedule_event(strtotime('tomorrow 02:30'), 'daily', 'chatbot_woo_nightly_event');
+  }
+  wp_send_json(['ok'=>true, 'scheduled'=>true, 'next'=>wp_next_scheduled('chatbot_woo_nightly_event')]);
+});
+
+add_action('wp_ajax_chatbot_woo_unschedule_cron', function(){
+  if (!current_user_can('manage_options')) { wp_send_json_error(['message'=>'forbidden'], 401); }
+  $timestamp = wp_next_scheduled('chatbot_woo_nightly_event');
+  if ($timestamp) wp_unschedule_event($timestamp, 'chatbot_woo_nightly_event');
+  wp_send_json(['ok'=>true, 'unscheduled'=>true]);
+});
+
+add_action('wp_ajax_chatbot_woo_run_now', function(){
+  if (!current_user_can('manage_options')) { wp_send_json_error(['message'=>'forbidden'], 401); }
+  do_action('chatbot_woo_nightly_event');
+  wp_send_json(['ok'=>true, 'ran'=>true, 'ts'=>time()]);
+});

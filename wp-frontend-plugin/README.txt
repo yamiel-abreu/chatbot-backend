@@ -213,3 +213,13 @@ Only visible (exclude hidden)
 Only in stock
 Only published products are considered.
 All prior features are preserved: floating widget, theming, analytics, site indexing, CSV/JSON product upload tools.
+
+
+
+V 2.9.4
+
+What changed in v2.9.4 (quick)
+Frontend: Messages now render as sanitized HTML with support for Markdown links and auto-linked URLs, so product suggestions like [Name](URL) are clickable.
+Styling: Added link styles in bubbles (.bubble a { text-decoration: underline; color: var(--chat-accent); }).
+Responsive: Chat window keeps the responsive height from prior version (height: min(70vh, 640px); min-height: 360px;).
+Backend: Version bump to 2.9.4 to keep parity (no logic changes vs 2.9.3).
