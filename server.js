@@ -753,34 +753,85 @@ app.post("/chat", async (req, res) => {
               ).join("\n")
             : "";
 
-          const strictInstruction = `You are a helpful website assistant for the client's e-commerce site.
-You MUST answer ONLY using the information in "Context" and optionally "Products".
-If the answer is not present in Context, reply exactly with: "I’m not sure based on the site content. Please contact support or check the website."
-Never invent facts. Prefer short, direct answers. Include links only if they are present in Context or Products.
+          const strictInstruction = `
+					Truth & Safety
+					- Never invent or infer facts beyond Context/Products.
+					- Do not guess about prices, stock, shipping, returns, sizes, or materials.
+					- If any required field (name, URL, price, currency) is missing or malformed, use the fallback line above.
 
-When you mention a product, format it as: [Product Name](ProductURL) — PRICE CUR.
-Be welcoming with greetings and, if user intent is unclear, briefly ask what they’re shopping for (category, budget, style).`;
+					Tone & Brevity
+					- Be concise, friendly, and practical. Short sentences.
+					- If the user’s intent is unclear or he/she is searching for suggestion, ask ONE clarifying question (category, budget, style, size) and stop.
+
+					Formatting Rules
+					- When referencing a product, format each item as:
+					  - [Product Name](ProductURL) — PRICE CUR
+					- One product per bullet (hyphen list). No paragraphs around the list.
+					- ProductURL must be exactly the WooCommerce permalink given in Products.
+					- Do not add HTML attributes or extra text to links. Do not return links with this format: <a href="https://… " target="_blank" …>Text</a>.
+					- Use prices/currencies exactly as provided (no conversions).
+
+					Behavior
+					- Refer producst when the user search citeria is clear and match the prodided content. Otherwise try to get more information from the user.
+					- Iterate with the user if needed. Ask a maximum of 3 consequitive questions on the product or user clarification phase.
+					- Prefer products that match the query (category/price/style/price range).
+					- If no exact matches, show up to 5 closest alternatives (still from Products).
+					- Only show variants listed explicitly in Products.
+					- No external links or images unless provided in Context/Products.
+					- Greetings: one short line (e.g., “Hi! How can I help you today?”).
+					- Be careful on not mixing details like products materials and dimentions, keep your answer aligned with the details present in Products.
+
+					Language
+					- Answer in the user’s language if detectable (ES/EN). Otherwise, use EN.
+
+					Refusal (must be exact)
+					I’m not sure based on the site content. Please contact support or check the website.`;
 
           const messages = [
             { role: "system", content: strictInstruction },
             { role: "user", content: `User question:\n${message}\n\n---\nContext:\n${contextText || "(no context found)"}\n\n${productText ? "---\n" + productText : ""}` }
           ];
 
-          reply = await callGPT(messages, apiKeyToUse);
-          usedAI = true;
-
           // Append canonical product links using exact permalinks
-          if (productBlocks.length) {
-            const canonical = "\n\nSuggested products:\n" + productBlocks.map(p =>
-              `• [${p.name}](${p.url})${p.price ? " — " + p.price + (p.currency ? " " + p.currency : "") : ""}`
-            ).join("\n");
-            reply = (reply || "").trim() + canonical;
-          }
+          // helper: convert any HTML <a> to Markdown, then trim
+			function anchorsToMarkdown(txt) {
+			  if (!txt) return "";
+			  // <a href="URL"...>TEXT</a>  ->  [TEXT](URL)
+			  return String(txt).replace(
+				/<a\s+[^>]*href="(https?:\/\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/gi,
+				(_m, url, text) => {
+				  const cleanText = String(text || "").replace(/<[^>]+>/g, "").trim();
+				  return cleanText ? `[${cleanText}](${url})` : url;
+				}
+			  ).trim();
+			}
 
-          if ((!reply || /I’m not sure based on the site content/i.test(reply)) && !contextBlocks.length) {
-            const faq = findFAQReply(message);
-            if (faq) reply = faq;
-          }
+			reply = await callGPT(messages, apiKeyToUse);
+			reply = anchorsToMarkdown(reply);
+			usedAI = true;
+
+			// If we have product hits, standardize output to a bullet list with real permalinks
+			if (productBlocks.length) {
+			  const bullets = productBlocks.map(p => {
+				const priceStr = p.price ? ` — ${p.price}${p.currency ? ` ${p.currency}` : ""}` : "";
+				return `• [${p.name}](${p.url})${priceStr}`;
+			  }).join("\n");
+
+			  // Keep a short opener if the model wrote something useful (without HTML noise)
+			  let opener = reply.replace(/\s+/g, " ").trim();
+			  // If opener is too long or just filler, replace with a tight intro
+			  if (!opener || opener.length > 180) {
+				opener = "Here are some options you might like:";
+			  }
+
+			  reply = `${opener}\n\n${bullets}`;
+			}
+
+			// If still unsure and no site context, try FAQ fallback
+			if ((!reply || /I’m not sure based on the site content/i.test(reply)) && !contextBlocks.length) {
+			  const faq = findFAQReply(message);
+			  if (faq) reply = faq;
+			}        
         }
       }
     }
