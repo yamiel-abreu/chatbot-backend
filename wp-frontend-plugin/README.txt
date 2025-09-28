@@ -223,3 +223,18 @@ Frontend: Messages now render as sanitized HTML with support for Markdown links 
 Styling: Added link styles in bubbles (.bubble a { text-decoration: underline; color: var(--chat-accent); }).
 Responsive: Chat window keeps the responsive height from prior version (height: min(70vh, 640px); min-height: 360px;).
 Backend: Version bump to 2.9.4 to keep parity (no logic changes vs 2.9.3).
+
+
+V 2.9.6
+
+What changed (and only this):
+
+Backend
+Products fed to the model as • [Name](URL) — Price Cur).
+Appended “Suggested products” canonical list using exact Woo permalinks.
+Healthcheck/version string → 2.9.6.
+
+Frontend
+Added htmlAnchorsToMarkdown() and used it in the renderer so raw <a …> never leaks attributes into bubbles.
+Kept your responsive height (min(70vh, 640px) + min height), Woo settings, preview/upload, and nightly WP-Cron features untouched.
+Version bumped to 2.9.6.

@@ -1,5 +1,5 @@
 // server.js
-// v2.9.4
+// v2.9.6
 // Author: YAA
 
 import express from "express";
@@ -248,27 +248,14 @@ function extractProductsFromHtml(html, pageUrl) {
 }
 
 // Chunk a large text (basic)
-function chunkText(text, chunkSize = CHUNK_SIZE, overlap = CHUNK_OVERLAP) {
-  const chunks = [];
-  let i = 0;
-  while (i < text.length) {
-    const end = Math.min(text.length, i + chunkSize);
-    const slice = text.slice(i, end);
-    chunks.push(slice.trim());
-    i = end - overlap;
-    if (i < 0) i = end;
-  }
-  return chunks.filter(Boolean);
-}
-
-// helper to honor global cap when chunking
 function chunkTextWithCaps(text, size, overlap, remaining) {
   if (remaining <= 0) return [];
   const out = [];
   let i = 0;
   while (i < text.length && out.length < remaining) {
     const end = Math.min(text.length, i + size);
-    out.push(text.slice(i, end).trim());
+    const slice = text.slice(i, end);
+    out.push(slice.trim());
     i = end - overlap;
     if (i < 0) i = end;
   }
@@ -762,7 +749,7 @@ app.post("/chat", async (req, res) => {
           const contextText = contextBlocks.map((b, i) => `#${i+1} [${b.url}]\n${b.text}`).join("\n\n");
           const productText = productBlocks.length
             ? "Products:\n" + productBlocks.map((p) =>
-                `• ${p.name}${p.price ? " — " + p.price + (p.currency ? " " + p.currency : "") : ""}\n  Link: ${p.url}\n  ${p.description || ""}`
+                `• [${p.name}](${p.url})${p.price ? " — " + p.price + (p.currency ? " " + p.currency : "") : ""}\n  ${p.description || ""}`
               ).join("\n")
             : "";
 
@@ -781,6 +768,14 @@ Be welcoming with greetings and, if user intent is unclear, briefly ask what the
 
           reply = await callGPT(messages, apiKeyToUse);
           usedAI = true;
+
+          // Append canonical product links using exact permalinks
+          if (productBlocks.length) {
+            const canonical = "\n\nSuggested products:\n" + productBlocks.map(p =>
+              `• [${p.name}](${p.url})${p.price ? " — " + p.price + (p.currency ? " " + p.currency : "") : ""}`
+            ).join("\n");
+            reply = (reply || "").trim() + canonical;
+          }
 
           if ((!reply || /I’m not sure based on the site content/i.test(reply)) && !contextBlocks.length) {
             const faq = findFAQReply(message);
@@ -852,8 +847,8 @@ app.get("/faqs", (_req, res) => {
 });
 
 // Healthcheck
-app.get("/", (_req, res) => res.json({ status: "ok", version: "2.9.4" }));
+app.get("/", (_req, res) => res.json({ status: "ok", version: "2.9.6" }));
 
 // Start server
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Chatbot backend v2.9.4 running on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Chatbot backend v2.9.6 running on port ${PORT}`));

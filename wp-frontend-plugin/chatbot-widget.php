@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Chatbot Widget + Analytics + Site Indexing
  * Description: Floating chatbot widget grounded on your website via RAG, with admin analytics, settings, site indexing, Woo sync, and product feed upload.
- * Version: 2.9.4
+ * Version: 2.9.6
  * Author: YAA
  */
 
@@ -222,8 +222,17 @@ function chatbot_widget_inject() {
         if (openState) launcher.removeAttribute("data-unread");
       }
 
+      // --- NEW: normalize raw <a href="…">text</a> into Markdown BEFORE escaping
+      function htmlAnchorsToMarkdown(s) {
+        return String(s || "").replace(/<a\s+[^>]*href="(https?:\/\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/gi, function(_m, url, text){
+          const clean = String(text || "").replace(/<[^>]+>/g, "");
+          return `[${clean}](${url})`;
+        });
+      }
+
       // --- SAFE renderer: Markdown links + auto-link bare URLs, XSS-escaped
       function renderMessageHTML(raw) {
+        const normalized = htmlAnchorsToMarkdown(raw);
         const esc = (s) => s
           .replace(/&/g, "&amp;")
           .replace(/</g, "&lt;")
@@ -235,19 +244,14 @@ function chatbot_widget_inject() {
         let last = 0;
         const md = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/gi;
         let m;
-        while ((m = md.exec(raw))) {
-          out += esc(raw.slice(last, m.index));
+        while ((m = md.exec(normalized))) {
+          out += esc(normalized.slice(last, m.index));
           const text = esc(m[1]);
-          const url = m[2];
-          if (/^https?:\/\//i.test(url)) {
-            const safeUrl = url.replace(/"/g, "%22");
-            out += `<a href="${safeUrl}" target="_blank" rel="noopener nofollow">${text}</a>`;
-          } else {
-            out += text;
-          }
+          const url = m[2].replace(/"/g, "%22");
+          out += `<a href="${url}" target="_blank" rel="noopener nofollow">${text}</a>`;
           last = md.lastIndex;
         }
-        out += esc(raw.slice(last));
+        out += esc(normalized.slice(last));
 
         out = out.replace(/(https?:\/\/[^\s<>{}]+)/gi, (u) => {
           const safeUrl = u.replace(/"/g, "%22");
