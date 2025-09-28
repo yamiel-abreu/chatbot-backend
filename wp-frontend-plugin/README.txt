@@ -252,3 +252,21 @@ Keeps target="_blank"/rel="noopener nofollow" in the generated anchors, but that
 Server backend
 Product answers are normalized to hyphen bullets with canonical [Name](Permalink) — PRICE CUR).
 Still converts any stray <a …> to Markdown to be safe.
+
+
+
+V 2.9.8
+
+What changed 
+
+server.js
+Usage is now stored per tenant & user (usage[tenantId][userId]).
+Memory is per tenant & user (userMemory[tenantId][userId]).
+Logs include tenantId; /analytics supports ?tenantId=....
+/chat/clear requires x-tenant-id and clears only that tenant’s memory/usage.
+Health/version bumped to 2.9.8.
+
+Plugin (frontend + admin)
+Frontend clearChat() now sends x-tenant-id.
+Admin Analytics fetches /analytics?tenantId=... (scoped to current tenant).
+Version bumped to 2.9.8.

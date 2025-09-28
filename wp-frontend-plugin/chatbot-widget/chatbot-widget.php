@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Chatbot Widget + Analytics + Site Indexing
  * Description: Floating chatbot widget grounded on your website via RAG, with admin analytics, settings, site indexing, Woo sync, and product feed upload.
- * Version: 2.9.7
+ * Version: 2.9.8
  * Author: YAA
  */
 
@@ -16,7 +16,7 @@ function nubedy_chatbot_get_option($key, $default = '') {
 
 // Set sensible defaults on activation (optional)
 register_activation_hook(__FILE__, function () {
-  add_option('chatbot_backend_url', 'https://chatbot-backend-9lxr.onrender.com');
+  add_option('chatbot_backend_url', 'https://chatbot.nubedy.com');
   add_option('chatbot_tenant_id', 'client-123');
   add_option('chatbot_base_url', get_site_url());
   add_option('chatbot_max_pages', '120');
@@ -35,7 +35,7 @@ register_activation_hook(__FILE__, function () {
 // FRONTEND CHATBOT WIDGET
 // -----------------------
 function chatbot_widget_inject() {
-  $backend = nubedy_chatbot_get_option('chatbot_backend_url', 'https://chatbot-backend-9lxr.onrender.com');
+  $backend = nubedy_chatbot_get_option('chatbot_backend_url', 'https://chatbot.nubedy.com');
   $tenant  = nubedy_chatbot_get_option('chatbot_tenant_id', 'client-123');
   $plan    = nubedy_chatbot_get_option('chatbot_plan', 'ai');
   $botname = nubedy_chatbot_get_option('chatbot_bot_name', 'Chatbot');
@@ -157,7 +157,8 @@ function chatbot_widget_inject() {
     }
 
     async function clearChat(resetUsage=false){
-        const res = await fetch(CLEAR_URL + (resetUsage ? "?reset=usage" : ""), { method: "DELETE", headers: { "x-user-id": userId } });
+        const headers = { "x-user-id": userId, "x-tenant-id": TENANT_ID };
+        const res = await fetch(CLEAR_URL + (resetUsage ? "?reset=usage" : ""), { method: "DELETE", headers });
         return res.json();
     }
     </script>
@@ -190,7 +191,7 @@ function chatbot_widget_inject() {
             <button id="chatbot-clear" title="Clear chat" class="chatbot-btn-secondary" type="button">Clear</button>
         </div>
         <div id="tiny-hint" class="chatbot-hint">
-          Powered by <a href="https://www.nubedy.com/chat" target="_blank" rel="noopener">Nubedy</a>
+          Powered by <a href="https://www.nubedy.com" target="_blank" rel="noopener">Nubedy</a>
         </div>
     </div>
 
@@ -368,7 +369,7 @@ function chatbot_widget_inject() {
               setUsage(data.usage, data.limit);
               if (data.limit && data.usage >= data.limit) {
                   input.disabled = true; sendBtn.disabled = true;
-                  hint.innerHTML = 'Limit reached. Powered by <a href="https://www.nubedy.com/chat" target="_blank" rel="noopener">Nubedy</a>';
+                  hint.innerHTML = 'Limit reached. Powered by <a href="https://www.nubedy.com" target="_blank" rel="noopener">Nubedy</a>';
               }
           } catch (e) {
               typing(false);
@@ -439,8 +440,10 @@ add_action('admin_init', function () {
 // ADMIN: ANALYTICS PAGE
 // ------------------------------
 function chatbot_analytics_page() {
-  $backend = nubedy_chatbot_get_option('chatbot_backend_url', 'https://chatbot-backend-9lxr.onrender.com');
+  $backend = nubedy_chatbot_get_option('chatbot_backend_url', 'https://chatbot.nubedy.com');
+  $tenant  = nubedy_chatbot_get_option('chatbot_tenant_id', 'client-123');
   $analytics_url = esc_js(rtrim($backend, '/').'/analytics');
+  $tenant_js = esc_js($tenant);
   ?>
     <div class="wrap">
         <h1>Chatbot Analytics</h1>
@@ -483,7 +486,8 @@ function chatbot_analytics_page() {
     </div>
 
     <script>
-    const ANALYTICS_URL = '<?php echo $analytics_url; ?>';
+    const TENANT = '<?php echo $tenant_js; ?>';
+    const ANALYTICS_URL = '<?php echo $analytics_url; ?>' + '?tenantId=' + encodeURIComponent(TENANT);
 
     function _escape(s){ return (s||"").toString().replace(/</g,"&lt;"); }
     function _num(n){ const x = Number(n); return Number.isFinite(x) ? x : null; }
@@ -571,7 +575,7 @@ function chatbot_analytics_page() {
 // ADMIN: SETTINGS & INDEX PAGE
 // ------------------------------
 function chatbot_settings_page() {
-  $backend = nubedy_chatbot_get_option('chatbot_backend_url', 'https://chatbot-backend-9lxr.onrender.com');
+  $backend = nubedy_chatbot_get_option('chatbot_backend_url', 'https://chatbot.nubedy.com');
   $tenant  = nubedy_chatbot_get_option('chatbot_tenant_id', 'client-123');
   $baseurl = nubedy_chatbot_get_option('chatbot_base_url', get_site_url());
   $maxpg   = nubedy_chatbot_get_option('chatbot_max_pages', '120');
@@ -595,7 +599,7 @@ function chatbot_settings_page() {
       <table class="form-table" role="presentation">
         <tr>
           <th scope="row"><label for="chatbot_backend_url">Backend URL</label></th>
-          <td><input name="chatbot_backend_url" id="chatbot_backend_url" type="url" class="regular-text" value="<?php echo $backend_esc; ?>" placeholder="https://your-backend.onrender.com"></td>
+          <td><input name="chatbot_backend_url" id="chatbot_backend_url" type="url" class="regular-text" value="<?php echo $backend_esc; ?>" placeholder="https://chatbot.nubedy.com"></td>
         </tr>
         <tr>
           <th scope="row"><label for="chatbot_tenant_id">Tenant ID</label></th>
@@ -802,7 +806,7 @@ function chatbot_woo_page() {
       <table class="form-table" role="presentation">
         <tr>
           <th scope="row">Backend URL</th>
-          <td><input name="chatbot_backend_url" type="url" class="regular-text" value="<?php echo $backend_esc; ?>" placeholder="https://your-backend.onrender.com"></td>
+          <td><input name="chatbot_backend_url" type="url" class="regular-text" value="<?php echo $backend_esc; ?>" placeholder="https://chatbot.nubedy.com"></td>
         </tr>
         <tr>
           <th scope="row">Tenant ID</th>

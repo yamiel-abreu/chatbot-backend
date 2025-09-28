@@ -1,5 +1,5 @@
 // server.js
-// v2.9.7
+// v2.9.8
 // Author: YAA
 
 import express from "express";
@@ -67,23 +67,25 @@ if (!fs.existsSync(FAQS_FILE)) {
   );
 }
 
-// ---- Usage helpers ----
+// ---- Usage helpers (per-tenant) ----
 function loadUsage() {
   try { return JSON.parse(fs.readFileSync(USAGE_FILE, "utf8")); } catch { return {}; }
 }
 function saveUsage(data) {
   fs.writeFileSync(USAGE_FILE, JSON.stringify(data, null, 2), "utf8");
 }
-
-// Reset usage per user if new month
-function ensureMonth(userId) {
+// Reset usage per (tenant,user) if new month
+function ensureMonth(userId, tenantId = "default") {
   const usage = loadUsage();
+  if (!usage[tenantId]) usage[tenantId] = {};
+  const t = usage[tenantId];
+
   const currentMonth = new Date().toISOString().slice(0, 7); // YYYY-MM
-  if (!usage[userId] || usage[userId].month !== currentMonth) {
-    usage[userId] = { month: currentMonth, aiCalls: 0, plan: "rule", lastResetAt: new Date().toISOString() };
+  if (!t[userId] || t[userId].month !== currentMonth) {
+    t[userId] = { month: currentMonth, aiCalls: 0, plan: "rule", lastResetAt: new Date().toISOString() };
     saveUsage(usage);
   }
-  return usage[userId];
+  return t[userId];
 }
 
 // ---- Plans ----
@@ -152,16 +154,16 @@ function loadFAQsIfChanged() {
 loadFAQsIfChanged();
 fs.watchFile(FAQS_FILE, { interval: 1000 }, () => loadFAQsIfChanged());
 
-// ---- Memory + logs (in-memory) ----
-const userMemory = {};
-const logs = [];
+// ---- Memory + logs (in-memory, per-tenant) ----
+const userMemory = {}; // { [tenantId]: { [userId]: [{...}] } }
+const logs = [];       // global list with tenantId included
 
 // ==========================
 // RAG: crawl + embeddings
 // ==========================
 
 function tenantDir(tenantId) {
-  const safe = tenantId.replace(/[^a-z0-9\-_]/gi, "_").toLowerCase();
+  const safe = (tenantId || "default").replace(/[^a-z0-9\-_]/gi, "_").toLowerCase();
   const dir = path.join(TENANTS_DIR, safe);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   return dir;
@@ -204,6 +206,7 @@ async function fetchSitemapUrls(baseUrl, max = 120) {
     const urls = Array.from(xml.matchAll(/<loc>([^<]+)<\/loc>/gi)).map(m => m[1]).slice(0, max);
     if (urls.length) return urls;
   } catch {}
+  // Fallback: just start from baseUrl
   return [baseUrl];
 }
 
@@ -245,6 +248,7 @@ function extractProductsFromHtml(html, pageUrl) {
   return products;
 }
 
+// Chunk a large text (basic)
 function chunkTextWithCaps(text, size, overlap, remaining) {
   if (remaining <= 0) return [];
   const out = [];
@@ -275,6 +279,7 @@ async function embedBatch(texts, batchSize = EMB_BATCH) {
     }
     const data = await res.json();
     out.push(...data.data.map(d => d.embedding));
+    // tiny delay to smooth bursts
     await new Promise(r => setTimeout(r, 100));
   }
   return out;
@@ -385,6 +390,7 @@ async function buildTenantIndex(tenantId, baseUrl, maxPages = 80) {
 
   const urls = await fetchSitemapUrls(baseUrl, maxPages);
 
+  // prepare embeddings writer (stream JSON array incrementally)
   const embStream = fs.createWriteStream(EMB_FILE, { flags: "w" });
   embStream.write('{"chunks":[');
   let firstChunkWritten = false;
@@ -398,6 +404,7 @@ async function buildTenantIndex(tenantId, baseUrl, maxPages = 80) {
   let totalChunks = 0;
   const products = [];
 
+  // crawl sequentially to keep memory flat
   for (const u of urls) {
     if (totalPages >= maxPages || totalChunks >= MAX_CHUNKS_PER_TENANT) break;
     try {
@@ -412,6 +419,7 @@ async function buildTenantIndex(tenantId, baseUrl, maxPages = 80) {
       const cs = chunkTextWithCaps(text, CHUNK_SIZE, CHUNK_OVERLAP, remaining);
       totalPages++;
 
+      // embed this page's chunks in small batches and write as we go
       for (let i = 0; i < cs.length; i += EMB_BATCH) {
         const sliceTexts = cs.slice(i, i + EMB_BATCH);
         const vecs = await embedBatch(sliceTexts, EMB_BATCH);
@@ -426,12 +434,14 @@ async function buildTenantIndex(tenantId, baseUrl, maxPages = 80) {
     }
   }
 
+  // close embeddings stream
   embStream.write("]}");
   await new Promise((resolve, reject) => {
     embStream.end(resolve);
     embStream.on("error", reject);
   });
 
+  // product embeddings (usually small; fine to do in one go)
   if (products.length) {
     const texts = products.map(p => `${p.name}\n${p.description}\n${p.brand}\n${p.price} ${p.currency}`.trim());
     const pvecs = await embedBatch(texts);
@@ -440,6 +450,7 @@ async function buildTenantIndex(tenantId, baseUrl, maxPages = 80) {
     writeJSON(PROD_FILE, { products: [], emb: [] });
   }
 
+  // Invalidate caches for this tenant
   TENANT_EMB_CACHE.delete(tenantId);
   TENANT_PROD_CACHE.delete(tenantId);
 
@@ -464,7 +475,7 @@ async function retrieveContext(tenantId, query, k = 8) {
   const q = await embedQueryCached(query);
   const { chunks } = getTenantEmbeddingsCached(tenantId);
   if (!chunks.length) return [];
-  const scored = chunks.map(c => ({ ...c, score: dot(q, c.vec) }));
+  const scored = chunks.map(c => ({ ...c, score: dot(q, c.vec) })); // cosine because normalized
   scored.sort((a, b) => b.score - a.score);
   return scored.slice(0, k);
 }
@@ -522,7 +533,7 @@ function clampLimit(planName, headerLimit) {
   const base = PLANS[planName] || PLANS.rule;
   if (!headerLimit) return base.AI_MONTHLY_LIMIT;
   const n = Number(headerLimit);
-  if (Number.isFinite(n) && n > 0) return Math.min(n, 100000);
+  if (Number.isFinite(n) && n > 0) return Math.min(n, 100000); // sanity cap
   return base.AI_MONTHLY_LIMIT;
 }
 
@@ -618,7 +629,7 @@ function parseCsvSmart(csvText) {
 // POST /site/index  { tenantId, baseUrl, maxPages? }
 app.post("/site/index", async (req, res) => {
   try {
-    const tenantId = (req.body?.tenantId || "").toString().trim();
+    const tenantId = (req.body?.tenantId || "").toString().trim() || "default";
     const baseUrlRaw = (req.body?.baseUrl || "").toString().trim();
     const maxPages = Number(req.body?.maxPages) || 80;
     if (!tenantId || !baseUrlRaw) return res.status(400).json({ error: "tenantId and baseUrl required" });
@@ -639,7 +650,7 @@ app.post("/site/index", async (req, res) => {
 
 // GET /site/status?tenantId=xxx
 app.get("/site/status", (req, res) => {
-  const tenantId = (req.query?.tenantId || "").toString();
+  const tenantId = (req.query?.tenantId || "").toString().trim() || "default";
   if (!tenantId) return res.status(400).json({ error: "tenantId required" });
   const dir = tenantDir(tenantId);
   const file = path.join(dir, "status.json");
@@ -650,7 +661,7 @@ app.get("/site/status", (req, res) => {
 // POST /products/upload
 app.post("/products/upload", async (req, res) => {
   try {
-    const tenantId = (req.body?.tenantId || "").toString().trim();
+    const tenantId = (req.body?.tenantId || "").toString().trim() || "default";
     if (!tenantId) return res.status(400).json({ error: "tenantId required" });
 
     let items = [];
@@ -686,7 +697,7 @@ app.post("/products/upload", async (req, res) => {
 
 // GET /products?tenantId=xxx
 app.get("/products", (req, res) => {
-  const tenantId = (req.query?.tenantId || "").toString();
+  const tenantId = (req.query?.tenantId || "").toString().trim() || "default";
   if (!tenantId) return res.status(400).json({ error: "tenantId required" });
   const { products } = loadTenantProducts(tenantId);
   res.json({ ok: true, count: products.length, products });
@@ -695,7 +706,7 @@ app.get("/products", (req, res) => {
 // POST /chat
 app.post("/chat", async (req, res) => {
   const userId = (req.headers["x-user-id"] || "").toString() || uuidv4();
-  const tenantId = (req.headers["x-tenant-id"] || "").toString().trim();
+  const tenantId = (req.headers["x-tenant-id"] || "").toString().trim() || "default";
   const message = (req.body?.message || "").toString();
   let userPlan = (req.headers["x-plan"] || "rule").toString();
   const customApiKey = (req.headers["x-api-key"] || "").toString().trim();
@@ -703,13 +714,15 @@ app.post("/chat", async (req, res) => {
 
   if (!PLANS[userPlan]) userPlan = "rule";
 
-  const usage = ensureMonth(userId);
+  const usage = ensureMonth(userId, tenantId);
   usage.plan = userPlan;
   const allUsage = loadUsage();
-  allUsage[userId] = usage;
+  if (!allUsage[tenantId]) allUsage[tenantId] = {};
+  allUsage[tenantId][userId] = usage;
   saveUsage(allUsage);
 
-  if (!userMemory[userId]) userMemory[userId] = [];
+  if (!userMemory[tenantId]) userMemory[tenantId] = {};
+  if (!userMemory[tenantId][userId]) userMemory[tenantId][userId] = [];
 
   let reply = "";
   let usedAI = false;
@@ -812,6 +825,7 @@ I’m not sure based on the site content. Please contact support or check the we
             reply = `${opener}\n\n${bullets}`;
           }
 
+          // If still unsure and no site context, try FAQ fallback
           if ((!reply || /I’m not sure based on the site content/i.test(reply)) && !contextBlocks.length) {
             const faq = findFAQReply(message);
             if (faq) reply = faq;
@@ -824,19 +838,21 @@ I’m not sure based on the site content. Please contact support or check the we
     reply = findFAQReply(message) || "⚠️ Sorry, I could not generate a response.";
   }
 
-  let limit = clampLimit(userPlan, overrideLimit);
+  const limit = clampLimit(userPlan, overrideLimit);
   if (usedAI) {
     usage.aiCalls++;
     const all = loadUsage();
-    all[userId] = usage;
+    if (!all[tenantId]) all[tenantId] = {};
+    all[tenantId][userId] = usage;
     saveUsage(all);
   }
 
-  userMemory[userId].push({ role: "user", text: message, ts: new Date().toISOString() });
-  userMemory[userId].push({ role: "assistant", text: reply, ts: new Date().toISOString() });
+  userMemory[tenantId][userId].push({ role: "user", text: message, ts: new Date().toISOString() });
+  userMemory[tenantId][userId].push({ role: "assistant", text: reply, ts: new Date().toISOString() });
 
   logs.push({
     timestamp: new Date().toISOString(),
+    tenantId,
     userId,
     message,
     response: reply,
@@ -851,28 +867,37 @@ I’m not sure based on the site content. Please contact support or check the we
 // DELETE /chat/clear
 app.delete("/chat/clear", (req, res) => {
   const userId = (req.headers["x-user-id"] || "").toString();
+  const tenantId = (req.headers["x-tenant-id"] || "").toString().trim() || "default";
   if (!userId) return res.status(400).json({ error: "Missing x-user-id header" });
+  if (!tenantId) return res.status(400).json({ error: "Missing x-tenant-id header" });
 
-  userMemory[userId] = [];
+  if (userMemory[tenantId]) userMemory[tenantId][userId] = [];
 
   if (req.query?.reset === "usage") {
     const all = loadUsage();
     const currentMonth = new Date().toISOString().slice(0, 7);
-    all[userId] = { month: currentMonth, aiCalls: 0, plan: all[userId]?.plan || "rule", lastResetAt: new Date().toISOString() };
+    if (!all[tenantId]) all[tenantId] = {};
+    all[tenantId][userId] = { month: currentMonth, aiCalls: 0, plan: all[tenantId][userId]?.plan || "rule", lastResetAt: new Date().toISOString() };
     saveUsage(all);
   }
 
   res.json({ ok: true });
 });
 
-// GET /usage/:userId
+// GET /usage/:userId?tenantId=xxx
 app.get("/usage/:userId", (req, res) => {
-  const usage = ensureMonth(req.params.userId.toString());
+  const tenantId = (req.query?.tenantId || "").toString().trim() || "default";
+  if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+  const usage = ensureMonth(req.params.userId.toString(), tenantId);
   res.json(usage);
 });
 
-// GET /analytics
-app.get("/analytics", (_req, res) => res.json(logs));
+// GET /analytics?tenantId=xxx
+app.get("/analytics", (req, res) => {
+  const tenantId = (req.query?.tenantId || "").toString().trim();
+  const out = tenantId ? logs.filter(l => l.tenantId === tenantId) : logs;
+  res.json(out);
+});
 
 // (optional) GET /faqs
 app.get("/faqs", (_req, res) => {
@@ -882,8 +907,8 @@ app.get("/faqs", (_req, res) => {
 });
 
 // Healthcheck
-app.get("/", (_req, res) => res.json({ status: "ok", version: "2.9.7" }));
+app.get("/", (_req, res) => res.json({ status: "ok", version: "2.9.8" }));
 
 // Start server
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Chatbot backend v2.9.7 running on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Chatbot backend v2.9.8 running on port ${PORT}`));
