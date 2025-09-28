@@ -238,3 +238,17 @@ Frontend
 Added htmlAnchorsToMarkdown() and used it in the renderer so raw <a …> never leaks attributes into bubbles.
 Kept your responsive height (min(70vh, 640px) + min height), Woo settings, preview/upload, and nightly WP-Cron features untouched.
 Version bumped to 2.9.6.
+
+
+V 2.9.7
+
+What changed:
+
+Frontend renderer
+Removed the “autolink after HTML injection” bug.
+Now: escape → parse Markdown → autolink the non-link chunks only.
+Keeps target="_blank"/rel="noopener nofollow" in the generated anchors, but that’s in the HTML tag and no longer leaks into visible text.
+
+Server backend
+Product answers are normalized to hyphen bullets with canonical [Name](Permalink) — PRICE CUR).
+Still converts any stray <a …> to Markdown to be safe.

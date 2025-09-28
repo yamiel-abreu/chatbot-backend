@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Chatbot Widget + Analytics + Site Indexing
  * Description: Floating chatbot widget grounded on your website via RAG, with admin analytics, settings, site indexing, Woo sync, and product feed upload.
- * Version: 2.9.6
+ * Version: 2.9.7
  * Author: YAA
  */
 
@@ -230,33 +230,44 @@ function chatbot_widget_inject() {
         });
       }
 
-      // --- SAFE renderer: Markdown links + auto-link bare URLs, XSS-escaped
-      function renderMessageHTML(raw) {
-        const normalized = htmlAnchorsToMarkdown(raw);
-        const esc = (s) => s
+      // Escape HTML special chars
+      function esc(s){
+        return String(s||"")
           .replace(/&/g, "&amp;")
           .replace(/</g, "&lt;")
           .replace(/>/g, "&gt;")
           .replace(/"/g, "&quot;")
           .replace(/'/g, "&#39;");
+      }
+
+      // Autolink bare URLs inside an *escaped* text fragment (safe)
+      function autolinkEscaped(escapedText) {
+        return escapedText.replace(/(https?:\/\/[^\s<>{}]+)/gi, function(u){
+          const safeUrl = u.replace(/"/g, "%22");
+          return `<a href="${safeUrl}" target="_blank" rel="noopener nofollow">${u}</a>`;
+        });
+      }
+
+      // SAFE renderer: Markdown links + auto-link bare URLs, XSS-escaped.
+      // We ONLY autolink in the non-link segments so href="" isn’t mangled.
+      function renderMessageHTML(raw) {
+        const normalized = htmlAnchorsToMarkdown(raw);
+        const md = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/gi;
 
         let out = "";
         let last = 0;
-        const md = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/gi;
         let m;
         while ((m = md.exec(normalized))) {
-          out += esc(normalized.slice(last, m.index));
+          const before = normalized.slice(last, m.index);
+          out += autolinkEscaped(esc(before)); // escape + autolink the non-link part
+
           const text = esc(m[1]);
           const url = m[2].replace(/"/g, "%22");
           out += `<a href="${url}" target="_blank" rel="noopener nofollow">${text}</a>`;
           last = md.lastIndex;
         }
-        out += esc(normalized.slice(last));
-
-        out = out.replace(/(https?:\/\/[^\s<>{}]+)/gi, (u) => {
-          const safeUrl = u.replace(/"/g, "%22");
-          return `<a href="${safeUrl}" target="_blank" rel="noopener nofollow">${u}</a>`;
-        });
+        const tail = normalized.slice(last);
+        out += autolinkEscaped(esc(tail));
 
         return out.replace(/\n/g, "<br>");
       }
@@ -366,14 +377,14 @@ function chatbot_widget_inject() {
           }
       }
 
-      sendBtn.addEventListener("click", handleSend);
+      document.getElementById("chatbot-send").addEventListener("click", handleSend);
       input.addEventListener("keypress", (e) => { if (e.key === "Enter") handleSend(); });
 
-      clearBtn.addEventListener("click", async () => {
+      document.getElementById("chatbot-clear").addEventListener("click", async () => {
           try { await clearChat(false); } catch {}
           localStorage.removeItem(STORAGE_KEY);
           messagesDiv.innerHTML = "";
-          input.disabled = false; sendBtn.disabled = false;
+          input.disabled = false; document.getElementById("chatbot-send").disabled = false;
           setUsage(0, 0);
           bubble("Bot", "Chat cleared. How can I help?");
       });

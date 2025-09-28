@@ -1,5 +1,5 @@
 // server.js
-// v2.9.6
+// v2.9.7
 // Author: YAA
 
 import express from "express";
@@ -117,18 +117,17 @@ function safeToRegExp(trigger) {
     const match = s.match(/^\/(.+)\/([a-z]*)$/i); // "/pattern/flags"
     let pattern = match ? match[1] : s;
     let flags = (match ? match[2] : "i") || "i";
-    // Remove inline PCRE flag (?i) which JS RegExp doesn't support
-    pattern = pattern.replace(/\(\?i\)/gi, "");
+    pattern = pattern.replace(/\(\?i\)/gi, ""); // JS doesn't support inline (?i)
     try {
       if (!/i/.test(flags)) flags += "i";
       return new RegExp(pattern, flags);
     } catch (e) {
       console.warn("Bad FAQ regex string:", s, e.message);
-      return /$a^/; // never matches
+      return /$a^/;
     }
   }
 
-  return /$a^/; // never matches
+  return /$a^/;
 }
 
 function compileFAQs(raw) {
@@ -205,7 +204,6 @@ async function fetchSitemapUrls(baseUrl, max = 120) {
     const urls = Array.from(xml.matchAll(/<loc>([^<]+)<\/loc>/gi)).map(m => m[1]).slice(0, max);
     if (urls.length) return urls;
   } catch {}
-  // Fallback: just start from baseUrl
   return [baseUrl];
 }
 
@@ -247,7 +245,6 @@ function extractProductsFromHtml(html, pageUrl) {
   return products;
 }
 
-// Chunk a large text (basic)
 function chunkTextWithCaps(text, size, overlap, remaining) {
   if (remaining <= 0) return [];
   const out = [];
@@ -278,7 +275,6 @@ async function embedBatch(texts, batchSize = EMB_BATCH) {
     }
     const data = await res.json();
     out.push(...data.data.map(d => d.embedding));
-    // tiny delay to smooth bursts
     await new Promise(r => setTimeout(r, 100));
   }
   return out;
@@ -389,7 +385,6 @@ async function buildTenantIndex(tenantId, baseUrl, maxPages = 80) {
 
   const urls = await fetchSitemapUrls(baseUrl, maxPages);
 
-  // prepare embeddings writer (stream JSON array incrementally)
   const embStream = fs.createWriteStream(EMB_FILE, { flags: "w" });
   embStream.write('{"chunks":[');
   let firstChunkWritten = false;
@@ -403,7 +398,6 @@ async function buildTenantIndex(tenantId, baseUrl, maxPages = 80) {
   let totalChunks = 0;
   const products = [];
 
-  // crawl sequentially to keep memory flat
   for (const u of urls) {
     if (totalPages >= maxPages || totalChunks >= MAX_CHUNKS_PER_TENANT) break;
     try {
@@ -418,7 +412,6 @@ async function buildTenantIndex(tenantId, baseUrl, maxPages = 80) {
       const cs = chunkTextWithCaps(text, CHUNK_SIZE, CHUNK_OVERLAP, remaining);
       totalPages++;
 
-      // embed this page's chunks in small batches and write as we go
       for (let i = 0; i < cs.length; i += EMB_BATCH) {
         const sliceTexts = cs.slice(i, i + EMB_BATCH);
         const vecs = await embedBatch(sliceTexts, EMB_BATCH);
@@ -433,14 +426,12 @@ async function buildTenantIndex(tenantId, baseUrl, maxPages = 80) {
     }
   }
 
-  // close embeddings stream
   embStream.write("]}");
   await new Promise((resolve, reject) => {
     embStream.end(resolve);
     embStream.on("error", reject);
   });
 
-  // product embeddings (usually small; fine to do in one go)
   if (products.length) {
     const texts = products.map(p => `${p.name}\n${p.description}\n${p.brand}\n${p.price} ${p.currency}`.trim());
     const pvecs = await embedBatch(texts);
@@ -449,7 +440,6 @@ async function buildTenantIndex(tenantId, baseUrl, maxPages = 80) {
     writeJSON(PROD_FILE, { products: [], emb: [] });
   }
 
-  // Invalidate caches for this tenant
   TENANT_EMB_CACHE.delete(tenantId);
   TENANT_PROD_CACHE.delete(tenantId);
 
@@ -474,7 +464,7 @@ async function retrieveContext(tenantId, query, k = 8) {
   const q = await embedQueryCached(query);
   const { chunks } = getTenantEmbeddingsCached(tenantId);
   if (!chunks.length) return [];
-  const scored = chunks.map(c => ({ ...c, score: dot(q, c.vec) })); // cosine because normalized
+  const scored = chunks.map(c => ({ ...c, score: dot(q, c.vec) }));
   scored.sort((a, b) => b.score - a.score);
   return scored.slice(0, k);
 }
@@ -532,7 +522,7 @@ function clampLimit(planName, headerLimit) {
   const base = PLANS[planName] || PLANS.rule;
   if (!headerLimit) return base.AI_MONTHLY_LIMIT;
   const n = Number(headerLimit);
-  if (Number.isFinite(n) && n > 0) return Math.min(n, 100000); // sanity cap
+  if (Number.isFinite(n) && n > 0) return Math.min(n, 100000);
   return base.AI_MONTHLY_LIMIT;
 }
 
@@ -740,7 +730,7 @@ app.post("/chat", async (req, res) => {
           let productBlocks = [];
           if (tenantId) {
             contextBlocks = await retrieveContext(tenantId, message, 8);
-            const producty = /\b(product|buy|price|sizes?|colors?|catalog|shop|add to cart|order|stock|available|recommend)\b/i.test(message);
+            const producty = /\b(product|buy|price|sizes?|colors?|catalog|shop|add to cart|order|stock|available|recommend|earrings?|ring|necklace|bracelet)\b/i.test(message);
             if (producty) {
               productBlocks = await retrieveProducts(tenantId, message, 6);
             }
@@ -749,89 +739,83 @@ app.post("/chat", async (req, res) => {
           const contextText = contextBlocks.map((b, i) => `#${i+1} [${b.url}]\n${b.text}`).join("\n\n");
           const productText = productBlocks.length
             ? "Products:\n" + productBlocks.map((p) =>
-                `• [${p.name}](${p.url})${p.price ? " — " + p.price + (p.currency ? " " + p.currency : "") : ""}\n  ${p.description || ""}`
+                `- [${p.name}](${p.url})${p.price ? " — " + p.price + (p.currency ? " " + p.currency : "") : ""}\n  ${p.description || ""}`
               ).join("\n")
             : "";
 
           const strictInstruction = `
-					Truth & Safety
-					- Never invent or infer facts beyond Context/Products.
-					- Do not guess about prices, stock, shipping, returns, sizes, or materials.
-					- If any required field (name, URL, price, currency) is missing or malformed, use the fallback line above.
+Truth & Safety
+- Never invent or infer facts beyond Context/Products.
+- Do not guess about prices, stock, shipping, returns, sizes, or materials.
+- If any required field (name, URL, price, currency) is missing or malformed, use the fallback line above.
 
-					Tone & Brevity
-					- Be concise, friendly, and practical. Short sentences.
-					- If the user’s intent is unclear or he/she is searching for suggestion, ask ONE clarifying question (category, budget, style, size) and stop.
+Tone & Brevity
+- Be concise, friendly, and practical. Short sentences.
+- If the user’s intent is unclear or they are browsing, ask ONE clarifying question (category, budget, style, size) and stop.
 
-					Formatting Rules
-					- When referencing a product, format each item as:
-					  - [Product Name](ProductURL) — PRICE CUR
-					- One product per bullet (hyphen list). No paragraphs around the list.
-					- ProductURL must be exactly the WooCommerce permalink given in Products.
-					- Do not add HTML attributes or extra text to links. Do not return links with this format: <a href="https://… " target="_blank" …>Text</a>.
-					- Use prices/currencies exactly as provided (no conversions).
+Formatting Rules
+- When referencing a product, format each item as:
+  - [Product Name](ProductURL) — PRICE CUR
+- Use a hyphen bullet per item (Markdown list). No long paragraphs around the list.
+- ProductURL must be exactly the WooCommerce permalink given in Products.
+- Do not add HTML attributes or extra text to links. Do NOT return <a ...> HTML.
 
-					Behavior
-					- Refer producst when the user search citeria is clear and match the prodided content. Otherwise try to get more information from the user.
-					- Iterate with the user if needed. Ask a maximum of 3 consequitive questions on the product or user clarification phase.
-					- Prefer products that match the query (category/price/style/price range).
-					- If no exact matches, show up to 5 closest alternatives (still from Products).
-					- Only show variants listed explicitly in Products.
-					- No external links or images unless provided in Context/Products.
-					- Greetings: one short line (e.g., “Hi! How can I help you today?”).
-					- Be careful on not mixing details like products materials and dimentions, keep your answer aligned with the details present in Products.
+Behavior
+- Refer products when the user request matches the provided Products. Otherwise, ask for clarification.
+- Ask at most 3 follow-ups if needed.
+- Prefer products that match the query (category/price/style/range).
+- If no exact matches, show up to 5 closest alternatives (from Products).
+- Only show variants listed explicitly in Products.
+- No external links or images unless provided in Context/Products.
+- Greetings: one short line.
 
-					Language
-					- Answer in the user’s language if detectable (ES/EN). Otherwise, use EN.
+Language
+- Answer in the user’s language if detectable (ES/EN). Otherwise, use EN.
 
-					Refusal (must be exact)
-					I’m not sure based on the site content. Please contact support or check the website.`;
+Refusal (must be exact)
+I’m not sure based on the site content. Please contact support or check the website.`.trim();
 
           const messages = [
             { role: "system", content: strictInstruction },
             { role: "user", content: `User question:\n${message}\n\n---\nContext:\n${contextText || "(no context found)"}\n\n${productText ? "---\n" + productText : ""}` }
           ];
 
-          // Append canonical product links using exact permalinks
-          // helper: convert any HTML <a> to Markdown, then trim
-			function anchorsToMarkdown(txt) {
-			  if (!txt) return "";
-			  // <a href="URL"...>TEXT</a>  ->  [TEXT](URL)
-			  return String(txt).replace(
-				/<a\s+[^>]*href="(https?:\/\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/gi,
-				(_m, url, text) => {
-				  const cleanText = String(text || "").replace(/<[^>]+>/g, "").trim();
-				  return cleanText ? `[${cleanText}](${url})` : url;
-				}
-			  ).trim();
-			}
+          // Convert any HTML anchors to Markdown to keep output uniform
+          function anchorsToMarkdown(txt) {
+            if (!txt) return "";
+            return String(txt).replace(
+              /<a\s+[^>]*href="(https?:\/\/[^"]+)"[^>]*>([\s\S]*?)<\/a>/gi,
+              (_m, url, text) => {
+                const cleanText = String(text || "").replace(/<[^>]+>/g, "").trim();
+                return cleanText ? `[${cleanText}](${url})` : url;
+              }
+            ).trim();
+          }
 
-			reply = await callGPT(messages, apiKeyToUse);
-			reply = anchorsToMarkdown(reply);
-			usedAI = true;
+          reply = await callGPT(messages, apiKeyToUse);
+          reply = anchorsToMarkdown(reply);
+          usedAI = true;
 
-			// If we have product hits, standardize output to a bullet list with real permalinks
-			if (productBlocks.length) {
-			  const bullets = productBlocks.map(p => {
-				const priceStr = p.price ? ` — ${p.price}${p.currency ? ` ${p.currency}` : ""}` : "";
-				return `• [${p.name}](${p.url})${priceStr}`;
-			  }).join("\n");
+          // If we have product hits, enforce standard bullet list with exact permalinks
+          if (productBlocks.length) {
+            const bullets = productBlocks.map(p => {
+              const priceStr = p.price ? ` — ${p.price}${p.currency ? ` ${p.currency}` : ""}` : "";
+              return `- [${p.name}](${p.url})${priceStr}`;
+            }).join("\n");
 
-			  // Keep a short opener if the model wrote something useful (without HTML noise)
-			  let opener = reply.replace(/\s+/g, " ").trim();
-			  // If opener is too long or just filler, replace with a tight intro
-			  if (!opener || opener.length > 180) {
-				opener = "Here are some options you might like:";
-			  }
+            let opener = reply.replace(/\s+/g, " ").trim();
+            if (!opener || opener.length > 180) {
+              opener = "Here are some options you might like:";
+            }
 
-			  reply = `${opener}\n\n${bullets}`;
-			}
+            // Ensure a blank line before list (proper Markdown)
+            reply = `${opener}\n\n${bullets}`;
+          }
 
-			// If still unsure and no site context, try FAQ fallback
-			if ((!reply || /I’m not sure based on the site content/i.test(reply)) && !contextBlocks.length) {
-			  const faq = findFAQReply(message);
-			  if (faq) reply = faq;
-			}        
+          if ((!reply || /I’m not sure based on the site content/i.test(reply)) && !contextBlocks.length) {
+            const faq = findFAQReply(message);
+            if (faq) reply = faq;
+          }
         }
       }
     }
@@ -898,8 +882,8 @@ app.get("/faqs", (_req, res) => {
 });
 
 // Healthcheck
-app.get("/", (_req, res) => res.json({ status: "ok", version: "2.9.6" }));
+app.get("/", (_req, res) => res.json({ status: "ok", version: "2.9.7" }));
 
 // Start server
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🚀 Chatbot backend v2.9.6 running on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Chatbot backend v2.9.7 running on port ${PORT}`));
